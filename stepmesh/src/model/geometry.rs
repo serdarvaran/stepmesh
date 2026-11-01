@@ -2,7 +2,7 @@
 
 use super::{Decoder, P3, Units, unit};
 use crate::Error;
-use crate::geom::{Curve, Nurbs1, Nurbs2, Surface, expand_knots};
+use crate::geom::{Curve, MAX_DEGREE, Nurbs1, Nurbs2, Surface, expand_knots};
 use crate::p21::{Record, Value};
 
 /// Records that give a B-spline curve its knots, explicitly or by form.
@@ -175,6 +175,12 @@ impl Decoder<'_> {
             None => vec![1.0; pts.len()],
         };
         let knots = self.knot_vector(id, form, k0, 1, pts.len(), degree)?;
+        if degree > MAX_DEGREE {
+            return Err(Error::Unsupported {
+                entity: format!("B-spline curve of degree {degree}"),
+                id,
+            });
+        }
         if degree == 0 || w.len() != pts.len() || knots.len() != pts.len() + degree + 1 {
             return self.invalid(id, "inconsistent B-spline curve");
         }
@@ -251,6 +257,12 @@ impl Decoder<'_> {
         let (base, form, off) = self.bspline_record(id, "B_SPLINE_SURFACE", &SURFACE_FORMS)?;
         let du = self.integer(id, base.params.get(off))?;
         let dv = self.integer(id, base.params.get(off + 1))?;
+        if du.max(dv) > MAX_DEGREE {
+            return Err(Error::Unsupported {
+                entity: format!("B-spline surface of degree {}", du.max(dv)),
+                id,
+            });
+        }
         let Some(Value::List(rows)) = base.params.get(off + 2) else {
             return self.invalid(id, "B-spline surface without control points");
         };

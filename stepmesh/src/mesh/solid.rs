@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use super::edges::discretize_edge;
 use super::face::{VRef, tessellate_face};
+use crate::fxhash::FxMap;
 use crate::model::{Brep, P3, cross, dot};
 use crate::{Error, Options};
 
@@ -33,7 +34,7 @@ pub fn mesh_brep(
     for (&id, e) in &b.edges {
         polys.insert(id, discretize_edge(e, o)?);
     }
-    let mut index: HashMap<Key, u32> = HashMap::new();
+    let mut index: FxMap<Key, u32> = FxMap::default();
     let mut positions: Vec<P3> = Vec::new();
     let mut triangles = Vec::new();
     let mut face_no = 0;

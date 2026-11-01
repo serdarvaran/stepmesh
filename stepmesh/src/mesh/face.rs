@@ -1,11 +1,12 @@
 //! Triangulation of one face in its (u, v) parameter space.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 
 use spade::handles::FixedVertexHandle;
 use spade::{ConstrainedDelaunayTriangulation, Point2, PositionInTriangulation, Triangulation};
 
 use super::edges::sample_curve;
+use crate::fxhash::FxSet;
 use crate::geom::Surface;
 use crate::model::{Face, Loop, P3, add, dot, mul, norm, sub};
 use crate::{Error, Options};
@@ -570,9 +571,10 @@ impl Ctx<'_> {
             }
         }
         let planar = matches!(self.s, Surface::Plane(_));
+        let mut checked = Checked::default();
         for _ in 0..if planar { 0 } else { MAX_REFINE_ROUNDS } {
             let inside = classify(&cdt);
-            let candidates = self.refinement_points(&cdt, &inside, &info);
+            let candidates = self.refinement_points(&cdt, &inside, &info, &mut checked);
             if candidates.is_empty() {
                 break;
             }
@@ -605,7 +607,7 @@ impl Ctx<'_> {
         let flip = !self.f.same_sense;
         let mut tris = Vec::new();
         for face in cdt.inner_faces() {
-            if !inside.contains(&face.fix().index()) {
+            if !inside[face.fix().index()] {
                 continue;
             }
             let [a, b, c] = face.vertices().map(|v| info[v.fix().index()].r);
@@ -649,21 +651,28 @@ impl Ctx<'_> {
     fn refinement_points(
         &self,
         cdt: &ConstrainedDelaunayTriangulation<Point2<f64>>,
-        inside: &HashSet<usize>,
+        inside: &[bool],
         info: &[BPoint],
+        checked: &mut Checked,
     ) -> Vec<(f64, f64)> {
         let (d, a) = (self.o.linear_deflection, self.o.angular_deflection);
         let mut out = Vec::new();
-        let mut seen_edges = HashSet::new();
         let cos_a = a.cos();
+        checked.normals.resize(info.len(), None);
         for face in cdt.inner_faces() {
-            if !inside.contains(&face.fix().index()) {
+            if !inside[face.fix().index()] {
                 continue;
             }
             // A triangle with two copies of a pole is a sliver of the fan: nothing to refine. Two
             // copies of a seam point, though, mean the triangle spans the whole face.
-            let v = face.vertices().map(|h| info[h.fix().index()]);
+            let hs = face.vertices().map(|h| h.fix().index());
+            let v = hs.map(|h| info[h]);
             if (0..3).any(|i| v[i].pole && v[i].r == v[(i + 1) % 3].r) {
+                continue;
+            }
+            let mut key = hs.map(|h| h as u32);
+            key.sort_unstable();
+            if checked.triangles.contains(&key) {
                 continue;
             }
             let uv_c = (
@@ -674,22 +683,30 @@ impl Ctx<'_> {
             let off = norm(sub(self.s.point(uv_c.0, uv_c.1), p_c));
             // The surface turns too much between the corners (pole copies excluded: there the
             // normal depends on the side the pole is approached from).
-            let normals: Vec<P3> = v
-                .iter()
-                .filter(|x| !x.pole)
-                .map(|x| self.s.normal(x.uv.0, x.uv.1))
+            let normals: Vec<P3> = (0..3)
+                .filter(|&i| !v[i].pole)
+                .map(|i| {
+                    *checked.normals[hs[i]]
+                        .get_or_insert_with(|| self.s.normal(v[i].uv.0, v[i].uv.1))
+                })
                 .collect();
             let turns = (0..normals.len())
                 .any(|i| (i + 1..normals.len()).any(|j| dot(normals[i], normals[j]) < cos_a));
             if off > d || turns {
                 out.push(uv_c);
+            } else {
+                checked.triangles.insert(key);
             }
             for e in face.adjacent_edges() {
-                let undirected = e.fix().as_undirected();
-                if cdt.is_constraint_edge(undirected) || !seen_edges.insert(undirected.index()) {
+                if cdt.is_constraint_edge(e.fix().as_undirected()) {
                     continue;
                 }
-                let [x, y] = e.vertices().map(|h| info[h.fix().index()]);
+                let ends = e.vertices().map(|h| h.fix().index() as u32);
+                let key = [ends[0].min(ends[1]), ends[0].max(ends[1])];
+                if !checked.edges.insert(key) {
+                    continue; // passed before, or already queued this round
+                }
+                let [x, y] = ends.map(|h| info[h as usize]);
                 let uv_m = ((x.uv.0 + y.uv.0) / 2.0, (x.uv.1 + y.uv.1) / 2.0);
                 if norm(sub(self.s.point(uv_m.0, uv_m.1), mul(add(x.p, y.p), 0.5))) > d {
                     out.push(uv_m);
@@ -700,44 +717,42 @@ impl Ctx<'_> {
     }
 }
 
+/// What the refinement already knows: triangles and edges (by vertex handles) that met the
+/// tolerances, and the surface normal at each vertex.
+#[derive(Default)]
+struct Checked {
+    triangles: FxSet<[u32; 3]>,
+    edges: FxSet<[u32; 2]>,
+    normals: Vec<Option<P3>>,
+}
+
 /// Inner faces inside the boundary: an odd number of constraint edges away from the outside.
-fn classify(cdt: &ConstrainedDelaunayTriangulation<Point2<f64>>) -> HashSet<usize> {
-    let mut parity: HashMap<usize, bool> = HashMap::new();
+fn classify(cdt: &ConstrainedDelaunayTriangulation<Point2<f64>>) -> Vec<bool> {
+    // Per face index: unvisited, even (outside) or odd (inside).
+    let mut parity: Vec<Option<bool>> = vec![None; cdt.num_all_faces()];
     let mut queue = VecDeque::new();
     for face in cdt.inner_faces() {
         for e in face.adjacent_edges() {
-            if e.rev().face().is_outer() {
-                let odd = cdt.is_constraint_edge(e.fix().as_undirected());
-                if let std::collections::hash_map::Entry::Vacant(slot) =
-                    parity.entry(face.fix().index())
-                {
-                    slot.insert(odd);
-                    queue.push_back(face.fix());
-                }
+            if e.rev().face().is_outer() && parity[face.fix().index()].is_none() {
+                parity[face.fix().index()] = Some(cdt.is_constraint_edge(e.fix().as_undirected()));
+                queue.push_back(face.fix());
             }
         }
     }
     while let Some(f) = queue.pop_front() {
-        let odd = parity[&f.index()];
+        let odd = parity[f.index()] == Some(true);
         for e in cdt.face(f).adjacent_edges() {
             let Some(g) = e.rev().face().as_inner() else {
                 continue;
             };
-            if parity.contains_key(&g.fix().index()) {
+            if parity[g.fix().index()].is_some() {
                 continue;
             }
-            parity.insert(
-                g.fix().index(),
-                odd != cdt.is_constraint_edge(e.fix().as_undirected()),
-            );
+            parity[g.fix().index()] = Some(odd != cdt.is_constraint_edge(e.fix().as_undirected()));
             queue.push_back(g.fix());
         }
     }
-    parity
-        .into_iter()
-        .filter(|&(_, odd)| odd)
-        .map(|(i, _)| i)
-        .collect()
+    parity.into_iter().map(|p| p == Some(true)).collect()
 }
 
 /// Shoelace area of a loop in parameter space, positive when counter-clockwise.

@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 mod error;
+mod fxhash;
 mod geom;
 mod mesh;
 mod model;

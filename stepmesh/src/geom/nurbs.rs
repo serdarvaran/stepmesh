@@ -54,10 +54,24 @@ fn find_span(n: usize, p: usize, u: f64, k: &[f64]) -> usize {
     lo
 }
 
-/// Non-zero basis functions and their first derivatives at `u` (A2.3 with n = 1).
-fn basis(span: usize, u: f64, p: usize, k: &[f64]) -> (Vec<f64>, Vec<f64>) {
-    let mut ndu = vec![vec![0.0; p + 1]; p + 1];
-    let (mut left, mut right) = (vec![0.0; p + 1], vec![0.0; p + 1]);
+/// Highest degree read; the basis is computed on the stack up to it.
+pub const MAX_DEGREE: usize = 16;
+const N: usize = MAX_DEGREE + 1;
+
+/// Non-zero basis functions and their first derivatives at `u` (A2.3 with n = 1); entries
+/// `0..=p` are meaningful.
+fn basis(span: usize, u: f64, p: usize, k: &[f64]) -> ([f64; N], [f64; N]) {
+    // Small work arrays for the usual degrees: zeroing the full table dominated the cost.
+    match p {
+        0..=3 => basis_in::<4>(span, u, p, k),
+        4..=7 => basis_in::<8>(span, u, p, k),
+        _ => basis_in::<N>(span, u, p, k),
+    }
+}
+
+fn basis_in<const M: usize>(span: usize, u: f64, p: usize, k: &[f64]) -> ([f64; N], [f64; N]) {
+    let mut ndu = [[0.0; M]; M];
+    let (mut left, mut right) = ([0.0; M], [0.0; M]);
     ndu[0][0] = 1.0;
     for j in 1..=p {
         left[j] = u - k[span + 1 - j];
@@ -75,23 +89,22 @@ fn basis(span: usize, u: f64, p: usize, k: &[f64]) -> (Vec<f64>, Vec<f64>) {
         }
         ndu[j][j] = saved;
     }
-    let n: Vec<f64> = (0..=p).map(|j| ndu[j][p]).collect();
-    let d = (0..=p)
-        .map(|r| {
-            if p == 0 {
-                return 0.0;
-            }
-            let mut v = 0.0;
-            if r >= 1 {
-                v += ndu[r - 1][p - 1] / ndu[p][r - 1];
-            }
-            if r < p {
-                v -= ndu[r][p - 1] / ndu[p][r];
-            }
-            let v = v * p as f64;
-            if v.is_finite() { v } else { 0.0 }
-        })
-        .collect();
+    let (mut n, mut d) = ([0.0; N], [0.0; N]);
+    for r in 0..=p {
+        n[r] = ndu[r][p];
+        if p == 0 {
+            continue;
+        }
+        let mut v = 0.0;
+        if r >= 1 {
+            v += ndu[r - 1][p - 1] / ndu[p][r - 1];
+        }
+        if r < p {
+            v -= ndu[r][p - 1] / ndu[p][r];
+        }
+        let v = v * p as f64;
+        d[r] = if v.is_finite() { v } else { 0.0 };
+    }
     (n, d)
 }
 
@@ -222,8 +235,8 @@ impl Nurbs2 {
         let (bu, dbu) = basis(su, u, self.du, &self.ku);
         let (bv, dbv) = basis(sv, v, self.dv, &self.kv);
         let (mut a, mut au, mut av) = ([0.0; 4], [0.0; 4], [0.0; 4]);
-        for (i, (bi, dbi)) in bu.iter().zip(&dbu).enumerate() {
-            for (j, (bj, dbj)) in bv.iter().zip(&dbv).enumerate() {
+        for (i, (bi, dbi)) in bu[..=self.du].iter().zip(&dbu).enumerate() {
+            for (j, (bj, dbj)) in bv[..=self.dv].iter().zip(&dbv).enumerate() {
                 let c = self.ctrl[su - self.du + i][sv - self.dv + j];
                 for k in 0..4 {
                     a[k] += bi * bj * c[k];

@@ -5,5 +5,5 @@ mod nurbs;
 mod surface;
 
 pub use curve::Curve;
-pub use nurbs::{Nurbs1, Nurbs2, expand_knots};
+pub use nurbs::{MAX_DEGREE, Nurbs1, Nurbs2, expand_knots};
 pub use surface::Surface;
