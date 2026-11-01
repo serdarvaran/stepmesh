@@ -2,11 +2,13 @@
 
 mod assembly;
 mod frame;
+mod geometry;
 mod units;
 
 pub use assembly::decode_model;
-pub(crate) use frame::cross;
 pub use frame::{Frame, P3, Transform};
+pub(crate) use frame::{add, cross, dot, mul, norm, sub, unit};
+pub use units::Units;
 
 use crate::Error;
 use crate::p21::{Entity, Exchange, Record, Value};
@@ -22,8 +24,8 @@ pub struct Instance {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Part {
     pub name: Option<String>,
-    /// B-rep solid instances with the millimetres-per-unit of the representation holding them.
-    pub breps: Vec<(u64, f64)>,
+    /// B-rep solid instances with the units of the representation holding them.
+    pub breps: Vec<(u64, Units)>,
     pub children: Vec<Instance>,
 }
 
@@ -127,4 +129,14 @@ impl<'a> Decoder<'a> {
         ids.sort_unstable();
         ids
     }
+}
+
+/// Curve instance `id` (tests and tools).
+pub fn decode_curve(x: &Exchange, id: u64, units: Units) -> Result<crate::geom::Curve, Error> {
+    Decoder::new(x).curve(id, units)
+}
+
+/// Surface instance `id` (tests and tools).
+pub fn decode_surface(x: &Exchange, id: u64, units: Units) -> Result<crate::geom::Surface, Error> {
+    Decoder::new(x).surface(id, units)
 }

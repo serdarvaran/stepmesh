@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 mod error;
+mod geom;
 mod model;
 pub mod p21;
 
@@ -10,5 +11,9 @@ pub use error::Error;
 /// Intermediate stages, exposed for the crate's own tests; not a stable interface.
 #[doc(hidden)]
 pub mod internals {
-    pub use crate::model::{Frame, Instance, Model, P3, Part, Transform, decode_model};
+    pub use crate::geom::{Curve, Nurbs1, Nurbs2, Surface, expand_knots};
+    pub use crate::model::{
+        Frame, Instance, Model, P3, Part, Transform, Units, decode_curve, decode_model,
+        decode_surface,
+    };
 }

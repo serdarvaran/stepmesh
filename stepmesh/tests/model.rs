@@ -18,7 +18,11 @@ fn model(name: &str) -> Result<Model, Error> {
 fn placed(m: &Model) -> Vec<(u64, f64, Transform)> {
     fn walk(m: &Model, part: usize, t: &Transform, out: &mut Vec<(u64, f64, Transform)>) {
         let p = &m.parts[part];
-        out.extend(p.breps.iter().map(|&(id, scale)| (id, scale, t.clone())));
+        out.extend(
+            p.breps
+                .iter()
+                .map(|&(id, units)| (id, units.length_mm, t.clone())),
+        );
         for c in &p.children {
             walk(m, c.part, &t.compose(&c.transform), out);
         }

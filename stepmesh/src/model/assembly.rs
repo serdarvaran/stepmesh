@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use super::{Decoder, Instance, Model, Part, Transform};
+use super::{Decoder, Instance, Model, Part, Transform, Units};
 use crate::Error;
 use crate::p21::{Exchange, Value};
 
@@ -209,7 +209,7 @@ impl Builder<'_> {
 
     fn add_items(&mut self, part: usize, rep: u64) -> Result<(), Error> {
         let r = self.d.first(rep)?;
-        let scale = self.d.length_scale_mm(rep)?;
+        let units = self.d.units(rep)?;
         for item in self.d.references(rep, r.params.get(1))? {
             let e = self.d.entity(item)?;
             let has = |names: &[&str]| {
@@ -219,7 +219,7 @@ impl Builder<'_> {
                     .map(|r| r.name.clone())
             };
             if has(&SOLID_ITEMS).is_some() {
-                self.parts[part].breps.push((item, scale));
+                self.parts[part].breps.push((item, units));
             } else if has(&SURFACE_ITEMS).is_some() {
                 self.surfaces.push(item);
             } else if let Some(name) = has(&UNSUPPORTED_SOLIDS) {
@@ -228,7 +228,7 @@ impl Builder<'_> {
                     id: item,
                 });
             } else if e.records[0].name == "MAPPED_ITEM" {
-                let child = self.mapped_item(item, scale)?;
+                let child = self.mapped_item(item, units)?;
                 self.parts[part].children.push(child);
             }
         }
@@ -236,21 +236,21 @@ impl Builder<'_> {
     }
 
     /// MAPPED_ITEM: the mapped representation placed by `target ∘ origin⁻¹`.
-    fn mapped_item(&mut self, item: u64, scale: f64) -> Result<Instance, Error> {
+    fn mapped_item(&mut self, item: u64, units: Units) -> Result<Instance, Error> {
         let r = self.d.first(item)?;
         let map = self.d.reference(item, r.params.get(1))?;
         let target = self.d.reference(item, r.params.get(2))?;
         let m = self.d.record(map, "REPRESENTATION_MAP")?;
         let origin = self.d.reference(map, m.params.first())?;
         let mapped = self.d.reference(map, m.params.get(1))?;
-        let mapped_scale = self.d.length_scale_mm(mapped)?;
+        let mapped_scale = self.d.units(mapped)?.length_mm;
         let key = match self.rep_owner.get(&mapped) {
             Some(&pd) => Key::Product(pd),
             None => Key::Representation(mapped),
         };
         let part = self.part(key)?;
         let t = self
-            .placement(target, scale)?
+            .placement(target, units.length_mm)?
             .compose(&self.placement(origin, mapped_scale)?.inverse());
         Ok(Instance { part, transform: t })
     }
@@ -378,11 +378,11 @@ impl Builder<'_> {
             let r = self.d.record(op, "ITEM_DEFINED_TRANSFORMATION")?;
             let i1 = self.d.reference(op, r.params.get(2))?;
             let i2 = self.d.reference(op, r.params.get(3))?;
-            let f1 = self.placement(i1, self.d.length_scale_mm(rep1)?)?;
-            let f2 = self.placement(i2, self.d.length_scale_mm(rep2)?)?;
+            let f1 = self.placement(i1, self.d.units(rep1)?.length_mm)?;
+            let f2 = self.placement(i2, self.d.units(rep2)?.length_mm)?;
             f2.compose(&f1.inverse())
         } else {
-            self.placement(op, self.d.length_scale_mm(rep2)?)?
+            self.placement(op, self.d.units(rep2)?.length_mm)?
         };
         let child_reps = self.closure(
             self.product_reps.get(&child).map_or(&[][..], Vec::as_slice),

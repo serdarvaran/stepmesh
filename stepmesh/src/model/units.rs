@@ -27,63 +27,69 @@ fn si_prefix(p: &str) -> Option<f64> {
     })
 }
 
+/// Length and plane angle units of a representation context.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Units {
+    pub length_mm: f64,
+    pub angle_rad: f64,
+}
+
 impl Decoder<'_> {
-    /// Millimetres per length unit of a representation's context. A context without a length unit is
-    /// read as millimetres, as OpenCascade does.
-    pub(crate) fn length_scale_mm(&self, representation: u64) -> Result<f64, Error> {
+    /// Units of a representation's context. A context without a length or angle unit is read
+    /// as millimetres and radians, as OpenCascade does.
+    pub(crate) fn units(&self, representation: u64) -> Result<Units, Error> {
         let rep = self.first(representation)?;
         let ctx = self.reference(representation, rep.params.get(2))?;
-        let Some(units) = self
+        let mut out = Units {
+            length_mm: 1.0,
+            angle_rad: 1.0,
+        };
+        let Some(assigned) = self
             .entity(ctx)?
             .records
             .iter()
             .find(|r| r.name == "GLOBAL_UNIT_ASSIGNED_CONTEXT")
         else {
-            return Ok(1.0);
+            return Ok(out);
         };
-        let Some(Value::List(units)) = units.params.first() else {
-            return self.invalid(ctx, "GLOBAL_UNIT_ASSIGNED_CONTEXT without units");
-        };
-        for u in units {
-            let Value::Ref(u) = *u else { continue };
-            if self
-                .entity(u)?
-                .records
-                .iter()
-                .any(|r| r.name == "LENGTH_UNIT")
-            {
-                return self.unit_mm(u, 0);
+        for u in self.references(ctx, assigned.params.first())? {
+            let e = self.entity(u)?;
+            if e.records.iter().any(|r| r.name == "LENGTH_UNIT") {
+                out.length_mm = self.unit_factor(u, "METRE", 1000.0, 0)?;
+            } else if e.records.iter().any(|r| r.name == "PLANE_ANGLE_UNIT") {
+                out.angle_rad = self.unit_factor(u, "RADIAN", 1.0, 0)?;
             }
         }
-        Ok(1.0)
+        Ok(out)
     }
 
-    fn unit_mm(&self, id: u64, depth: usize) -> Result<f64, Error> {
+    /// Size of unit `id` in the target unit, where one SI `base` unit is `si` target units.
+    fn unit_factor(&self, id: u64, base: &str, si: f64, depth: usize) -> Result<f64, Error> {
         if depth > MAX_UNIT_CHAIN {
             return self.invalid(id, "unit conversion chain too long or cyclic");
         }
         let e = self.entity(id)?;
-        if let Some(si) = e.records.iter().find(|r| r.name == "SI_UNIT") {
-            if !matches!(si.params.get(1), Some(Value::Enum(n)) if n == "METRE") {
-                return self.invalid(id, "length unit is not based on the metre");
+        if let Some(r) = e.records.iter().find(|r| r.name == "SI_UNIT") {
+            if !matches!(r.params.get(1), Some(Value::Enum(n)) if n == base) {
+                return self.invalid(
+                    id,
+                    &format!("unit is not based on the {}", base.to_lowercase()),
+                );
             }
-            let factor = match si.params.first() {
+            let prefix = match r.params.first() {
                 Some(Value::Enum(p)) => {
                     si_prefix(p).map_or_else(|| self.invalid(id, "unknown SI prefix"), Ok)?
                 }
                 _ => 1.0,
             };
-            return Ok(factor * 1000.0);
+            return Ok(prefix * si);
         }
         if let Some(c) = e.records.iter().find(|r| r.name == "CONVERSION_BASED_UNIT") {
             let m = self.reference(id, c.params.get(1))?;
             let mr = self.first(m)?;
-            let value = match mr.params.first() {
-                Some(Value::Typed(_, v)) => self.real(m, Some(v))?,
-                v => self.real(m, v)?,
-            };
-            let base = self.reference(m, mr.params.get(1))?;
-            return Ok(value * self.unit_mm(base, depth + 1)?);
+            let value = self.real(m, mr.params.first())?;
+            let unit = self.reference(m, mr.params.get(1))?;
+            return Ok(value * self.unit_factor(unit, base, si, depth + 1)?);
         }
         Err(Error::Unsupported {
             entity: e.records[0].name.clone(),

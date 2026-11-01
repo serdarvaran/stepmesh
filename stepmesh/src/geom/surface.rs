@@ -1,0 +1,379 @@
+use std::f64::consts::{FRAC_PI_2, TAU};
+
+use super::curve::{Curve, angle, dist2};
+use super::nurbs::Nurbs2;
+use crate::model::{Frame, P3, add, cross, dot, mul, norm, sub, unit};
+
+const NEWTON_STEPS: usize = 60;
+const INF: f64 = f64::INFINITY;
+
+/// Face geometry in millimetres. Parametrisations follow ISO 10303-42.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Surface {
+    /// `origin + u·x + v·y`
+    Plane(Frame),
+    /// `origin + r(cos u·x + sin u·y) + v·z`
+    Cylinder {
+        frame: Frame,
+        r: f64,
+    },
+    /// `origin + (r + v·tan α)(cos u·x + sin u·y) + v·z`
+    Cone {
+        frame: Frame,
+        r: f64,
+        half_angle: f64,
+    },
+    /// `origin + r·cos v(cos u·x + sin u·y) + r·sin v·z`
+    Sphere {
+        frame: Frame,
+        r: f64,
+    },
+    /// `origin + (R + r·cos v)(cos u·x + sin u·y) + r·sin v·z`
+    Torus {
+        frame: Frame,
+        major: f64,
+        minor: f64,
+    },
+    Nurbs(Nurbs2),
+    /// `curve(u) + v·dir`, `dir` of unit length.
+    Extrusion {
+        curve: Curve,
+        dir: P3,
+    },
+    /// `curve(v)` turned by `u` about the axis (unit `axis_dir`).
+    Revolution {
+        curve: Curve,
+        axis_origin: P3,
+        axis_dir: P3,
+    },
+}
+
+fn ring(f: &Frame, u: f64) -> (P3, P3) {
+    let (s, c) = u.sin_cos();
+    (
+        add(mul(f.x, c), mul(f.y, s)),
+        add(mul(f.x, -s), mul(f.y, c)),
+    )
+}
+
+/// Rotation of `p` by angle `a` about the unit axis `k` through the origin (Rodrigues).
+fn rotate(p: P3, k: P3, a: f64) -> P3 {
+    let (s, c) = a.sin_cos();
+    add(
+        add(mul(p, c), mul(cross(k, p), s)),
+        mul(k, dot(k, p) * (1.0 - c)),
+    )
+}
+
+/// Shifts a periodic value to the representative nearest `near`.
+fn nearest(x: f64, period: f64, near: f64) -> f64 {
+    x + ((near - x) / period).round() * period
+}
+
+impl Surface {
+    pub fn point(&self, u: f64, v: f64) -> P3 {
+        self.derivs(u, v).0
+    }
+
+    /// Point and partial derivatives along u and v.
+    pub fn derivs(&self, u: f64, v: f64) -> (P3, P3, P3) {
+        match self {
+            Surface::Plane(f) => (add(f.origin, add(mul(f.x, u), mul(f.y, v))), f.x, f.y),
+            Surface::Cylinder { frame: f, r } => {
+                let (e, de) = ring(f, u);
+                (
+                    add(f.origin, add(mul(e, *r), mul(f.z, v))),
+                    mul(de, *r),
+                    f.z,
+                )
+            }
+            Surface::Cone {
+                frame: f,
+                r,
+                half_angle,
+            } => {
+                let (e, de) = ring(f, u);
+                let t = half_angle.tan();
+                let rho = r + v * t;
+                (
+                    add(f.origin, add(mul(e, rho), mul(f.z, v))),
+                    mul(de, rho),
+                    add(mul(e, t), f.z),
+                )
+            }
+            Surface::Sphere { frame: f, r } => {
+                let (e, de) = ring(f, u);
+                let (s, c) = v.sin_cos();
+                (
+                    add(f.origin, add(mul(e, r * c), mul(f.z, r * s))),
+                    mul(de, r * c),
+                    add(mul(e, -r * s), mul(f.z, r * c)),
+                )
+            }
+            Surface::Torus {
+                frame: f,
+                major,
+                minor,
+            } => {
+                let (e, de) = ring(f, u);
+                let (s, c) = v.sin_cos();
+                let rho = major + minor * c;
+                (
+                    add(f.origin, add(mul(e, rho), mul(f.z, minor * s))),
+                    mul(de, rho),
+                    add(mul(e, -minor * s), mul(f.z, minor * c)),
+                )
+            }
+            Surface::Nurbs(n) => n.derivs(u, v),
+            Surface::Extrusion { curve, dir } => {
+                let (c, dc) = curve.derivs(u);
+                (add(c, mul(*dir, v)), dc, *dir)
+            }
+            Surface::Revolution {
+                curve,
+                axis_origin,
+                axis_dir,
+            } => {
+                let (c, dc) = curve.derivs(v);
+                let q = rotate(sub(c, *axis_origin), *axis_dir, u);
+                (
+                    add(*axis_origin, q),
+                    cross(*axis_dir, q),
+                    rotate(dc, *axis_dir, u),
+                )
+            }
+        }
+    }
+
+    /// Unit normal, `∂u × ∂v` direction.
+    pub fn normal(&self, u: f64, v: f64) -> P3 {
+        let analytic = match self {
+            Surface::Plane(f) => Some(f.z),
+            Surface::Cylinder { frame, .. } => Some(ring(frame, u).0),
+            Surface::Sphere { frame, r } => {
+                unit(sub(self.point(u, v), frame.origin)).map(|n| mul(n, r.signum()))
+            }
+            _ => None,
+        };
+        if let Some(n) = analytic {
+            return n;
+        }
+        let (_, du, dv) = self.derivs(u, v);
+        if let Some(n) = unit(cross(du, dv)) {
+            return n;
+        }
+        // Singular point (cone apex, pole of a B-spline patch): normal of a point next to it.
+        let [(u0, u1), (v0, v1)] = self.param_bounds();
+        let eps = 1e-7;
+        let (u2, v2) = (
+            (u + eps).clamp(u0, u1),
+            if v + eps <= v1 {
+                v + eps
+            } else {
+                (v - eps).max(v0)
+            },
+        );
+        let (_, du, dv) = self.derivs(u2, v2);
+        unit(cross(du, dv)).unwrap_or([0.0, 0.0, 1.0])
+    }
+
+    pub fn period(&self) -> (Option<f64>, Option<f64>) {
+        match self {
+            Surface::Plane(_) => (None, None),
+            Surface::Cylinder { .. } | Surface::Cone { .. } | Surface::Sphere { .. } => {
+                (Some(TAU), None)
+            }
+            Surface::Torus { .. } => (Some(TAU), Some(TAU)),
+            Surface::Nurbs(n) => {
+                let [(u0, u1), (v0, v1)] = n.range();
+                let closed_u = n.closed_u
+                    && (0..5).all(|i| {
+                        let v = v0 + (v1 - v0) * i as f64 / 4.0;
+                        dist2(n.derivs(u0, v).0, n.derivs(u1, v).0) < 1e-14
+                    });
+                let closed_v = n.closed_v
+                    && (0..5).all(|i| {
+                        let u = u0 + (u1 - u0) * i as f64 / 4.0;
+                        dist2(n.derivs(u, v0).0, n.derivs(u, v1).0) < 1e-14
+                    });
+                (closed_u.then_some(u1 - u0), closed_v.then_some(v1 - v0))
+            }
+            Surface::Extrusion { curve, .. } => (curve.period(), None),
+            Surface::Revolution { curve, .. } => (Some(TAU), curve.period()),
+        }
+    }
+
+    pub fn param_bounds(&self) -> [(f64, f64); 2] {
+        match self {
+            Surface::Plane(_) => [(-INF, INF), (-INF, INF)],
+            Surface::Cylinder { .. } => [(0.0, TAU), (-INF, INF)],
+            Surface::Cone { r, half_angle, .. } => {
+                let t = half_angle.tan();
+                let apex = if t > 0.0 { -r / t } else { -INF };
+                [(0.0, TAU), (apex, INF)]
+            }
+            Surface::Sphere { .. } => [(0.0, TAU), (-FRAC_PI_2, FRAC_PI_2)],
+            Surface::Torus { .. } => [(0.0, TAU), (0.0, TAU)],
+            Surface::Nurbs(n) => n.range(),
+            Surface::Extrusion { curve, .. } => [curve.param_range(), (-INF, INF)],
+            Surface::Revolution { curve, .. } => [(0.0, TAU), curve.param_range()],
+        }
+    }
+
+    /// Parameters of the surface point closest to `p`. Periodic parameters are returned next to
+    /// `hint` when one is given. `None` when the iteration does not settle.
+    pub fn project(&self, p: P3, hint: Option<(f64, f64)>) -> Option<(f64, f64)> {
+        let (u, v) = match self {
+            Surface::Plane(f) => {
+                let d = sub(p, f.origin);
+                (dot(d, f.x), dot(d, f.y))
+            }
+            Surface::Cylinder { frame: f, .. } => {
+                (self.azimuth(f, p, hint), dot(sub(p, f.origin), f.z))
+            }
+            Surface::Cone {
+                frame: f,
+                r,
+                half_angle,
+            } => {
+                let d = sub(p, f.origin);
+                let h = dot(d, f.z);
+                let rho = norm(sub(d, mul(f.z, h)));
+                let t = half_angle.tan();
+                let v = ((rho - r) * t + h) / (1.0 + t * t);
+                (self.azimuth(f, p, hint), v.max(self.param_bounds()[1].0))
+            }
+            Surface::Sphere { frame: f, .. } => {
+                let d = sub(p, f.origin);
+                let h = dot(d, f.z);
+                let rho = norm(sub(d, mul(f.z, h)));
+                (self.azimuth(f, p, hint), h.atan2(rho))
+            }
+            Surface::Torus {
+                frame: f, major, ..
+            } => {
+                let u = self.azimuth(f, p, hint);
+                let (e, _) = ring(f, u);
+                let q = sub(sub(p, f.origin), mul(e, *major));
+                (u, dot(q, f.z).atan2(dot(q, e)).rem_euclid(TAU))
+            }
+            _ => self.newton(p, hint.unwrap_or_else(|| self.start(p)))?,
+        };
+        let (pu, pv) = self.period();
+        Some(match hint {
+            Some((hu, hv)) => (
+                pu.map_or(u, |per| nearest(u, per, hu)),
+                pv.map_or(v, |per| nearest(v, per, hv)),
+            ),
+            None => (u, v),
+        })
+    }
+
+    /// Angle around the frame's axis; on the axis itself the hint's angle (or 0) is used.
+    fn azimuth(&self, f: &Frame, p: P3, hint: Option<(f64, f64)>) -> f64 {
+        let d = sub(p, f.origin);
+        let radial = sub(d, mul(f.z, dot(d, f.z)));
+        if norm(radial) < 1e-12 {
+            return hint.map_or(0.0, |h| h.0);
+        }
+        angle(f, p, 1.0, 1.0)
+    }
+
+    /// Starting parameters for the iteration: the best point of a grid over the bounds.
+    fn start(&self, p: P3) -> (f64, f64) {
+        if let Surface::Extrusion { curve, dir } = self {
+            let u = curve.project(p);
+            return (u, dot(sub(p, curve.point(u)), *dir));
+        }
+        if let Surface::Revolution {
+            curve,
+            axis_origin,
+            axis_dir,
+        } = self
+        {
+            // Turn `p` into the half-plane of a reference curve point, project it onto the curve
+            // there, then measure the angle between the two.
+            let (t0, t1) = curve.param_range();
+            let reference = curve.point(0.0_f64.clamp(t0, t1));
+            let frame = Frame::new(*axis_origin, *axis_dir, sub(reference, *axis_origin))
+                .or_else(|| Frame::new(*axis_origin, *axis_dir, [1.0, 0.0, 0.0]));
+            let Some(frame) = frame else {
+                return (0.0, 0.0);
+            };
+            let turn = angle(&frame, p, 1.0, 1.0);
+            let v = curve.project(add(
+                *axis_origin,
+                rotate(sub(p, *axis_origin), *axis_dir, -turn),
+            ));
+            let u = turn - angle(&frame, curve.point(v), 1.0, 1.0);
+            return (u.rem_euclid(TAU), v);
+        }
+        let [(u0, u1), (v0, v1)] = self.param_bounds();
+        let n = match self {
+            Surface::Nurbs(s) => (2 * s.ctrl.len().max(s.ctrl[0].len())).max(16),
+            _ => 32,
+        };
+        let mut best = (u0, v0, INF);
+        for i in 0..=n {
+            for j in 0..=n {
+                let (u, v) = (
+                    u0 + (u1 - u0) * i as f64 / n as f64,
+                    v0 + (v1 - v0) * j as f64 / n as f64,
+                );
+                let d = dist2(self.point(u, v), p);
+                if d < best.2 {
+                    best = (u, v, d);
+                }
+            }
+        }
+        (best.0, best.1)
+    }
+
+    /// Gauss–Newton on the squared distance with step halving; non-periodic parameters stay in
+    /// bounds.
+    fn newton(&self, p: P3, (mut u, mut v): (f64, f64)) -> Option<(f64, f64)> {
+        let [(u0, u1), (v0, v1)] = self.param_bounds();
+        let (pu, pv) = self.period();
+        let keep = |x: f64, lo: f64, hi: f64, per: Option<f64>| {
+            if per.is_some() { x } else { x.clamp(lo, hi) }
+        };
+        for _ in 0..NEWTON_STEPS {
+            let (s, su, sv) = self.derivs(u, v);
+            let r = sub(p, s);
+            let (a, b, c) = (dot(su, su), dot(su, sv), dot(sv, sv));
+            let (g1, g2) = (dot(su, r), dot(sv, r));
+            let det = a * c - b * b;
+            let (mut du, mut dv) = if det > 1e-24 * (a * c).max(1e-300) {
+                ((c * g1 - b * g2) / det, (a * g2 - b * g1) / det)
+            } else if a >= c && a > 0.0 {
+                (g1 / a, 0.0)
+            } else if c > 0.0 {
+                (0.0, g2 / c)
+            } else {
+                return None;
+            };
+            let before = dot(r, r);
+            let (mut nu, mut nv) = (u, v);
+            for _ in 0..30 {
+                nu = keep(u + du, u0, u1, pu);
+                nv = keep(v + dv, v0, v1, pv);
+                if dist2(self.point(nu, nv), p) <= before {
+                    break;
+                }
+                du *= 0.5;
+                dv *= 0.5;
+            }
+            let moved = (nu - u).abs().max((nv - v).abs());
+            (u, v) = (nu, nv);
+            if moved <= 1e-15 * (1.0 + u.abs().max(v.abs())) {
+                return Some((u, v));
+            }
+        }
+        // Accept a slow finish when the gradient has vanished (point off a curved surface).
+        let (s, su, sv) = self.derivs(u, v);
+        let r = sub(p, s);
+        let scale = norm(r).max(1e-9);
+        let grad_ok = |d: P3| dot(d, r).abs() <= 1e-9 * norm(d).max(1e-300) * scale;
+        (grad_ok(su) && grad_ok(sv)).then_some((u, v))
+    }
+}
