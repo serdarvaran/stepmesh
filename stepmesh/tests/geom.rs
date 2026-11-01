@@ -1,4 +1,4 @@
-use std::f64::consts::{FRAC_PI_2, PI, TAU};
+use std::f64::consts::{FRAC_1_SQRT_2, FRAC_PI_2, PI, TAU};
 
 use stepmesh::internals::{
     Curve, Frame, Nurbs1, Nurbs2, Surface, Units, decode_curve, decode_surface, expand_knots,
@@ -126,6 +126,31 @@ fn surfaces(rng: &mut Rng) -> Vec<(&'static str, Surface)> {
                     origin: [3.0, 0.0, 0.0],
                     dir: [0.287_347_885_566_345_2, 0.0, 0.957_826_285_221_150_7],
                 },
+                axis_origin: [0.0, 0.0, 0.0],
+                axis_dir: [0.0, 0.0, 1.0],
+            },
+        ),
+        (
+            // A ball about the z axis from a half circle in the yz plane: the profile starts
+            // and ends on the axis (poles at both ends of v).
+            "revolution from the axis",
+            Surface::Revolution {
+                curve: Curve::Nurbs(Nurbs1 {
+                    degree: 2,
+                    knots: expand_knots(&[3, 2, 3], &[0.0, 0.5, 1.0]),
+                    ctrl: vec![
+                        [0.0, 0.0, 4.0, 1.0],
+                        [0.0, 4.0 * FRAC_1_SQRT_2, 4.0 * FRAC_1_SQRT_2, FRAC_1_SQRT_2],
+                        [0.0, 4.0, 0.0, 1.0],
+                        [
+                            0.0,
+                            4.0 * FRAC_1_SQRT_2,
+                            -4.0 * FRAC_1_SQRT_2,
+                            FRAC_1_SQRT_2,
+                        ],
+                        [0.0, 0.0, -4.0, 1.0],
+                    ],
+                }),
                 axis_origin: [0.0, 0.0, 0.0],
                 axis_dir: [0.0, 0.0, 1.0],
             },

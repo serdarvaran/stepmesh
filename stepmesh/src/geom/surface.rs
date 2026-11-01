@@ -7,6 +7,8 @@ use crate::model::{Frame, P3, add, cross, dot, mul, norm, sub, unit};
 const NEWTON_STEPS: usize = 60;
 /// Grid points the projection starts from when the hint does not lead to the point.
 const MAX_STARTS: usize = 4;
+/// Curve points sampled for the half-plane of a surface of revolution's curve.
+const REVOLUTION_SAMPLES: usize = 16;
 const INF: f64 = f64::INFINITY;
 
 /// Face geometry in millimetres. Parametrisations follow ISO 10303-42.
@@ -325,12 +327,20 @@ impl Surface {
             axis_dir,
         } = self
         {
-            // Turn `p` into the half-plane of a reference curve point, project it onto the curve
-            // there, then measure the angle between the two.
+            // Turn `p` into the half-plane of the curve, project it onto the curve there, then
+            // measure the angle between the two. The half-plane is that of the curve's point
+            // farthest from the axis: the curve may start or end on it (a pole).
             let (t0, t1) = curve.param_range();
-            let reference = curve.point(0.0_f64.clamp(t0, t1));
-            let frame = Frame::new(*axis_origin, *axis_dir, sub(reference, *axis_origin))
-                .or_else(|| Frame::new(*axis_origin, *axis_dir, [1.0, 0.0, 0.0]));
+            let (a, b) = (t0.max(-1.0), t1.min(1.0).max(t0.max(-1.0)));
+            let off_axis = |q: P3| {
+                let d = sub(q, *axis_origin);
+                norm(sub(d, mul(*axis_dir, dot(d, *axis_dir))))
+            };
+            let reference = (0..=REVOLUTION_SAMPLES)
+                .map(|k| curve.point(a + (b - a) * k as f64 / REVOLUTION_SAMPLES as f64))
+                .max_by(|x, y| off_axis(*x).total_cmp(&off_axis(*y)))
+                .unwrap_or(*axis_origin);
+            let frame = Frame::new(*axis_origin, *axis_dir, sub(reference, *axis_origin));
             let Some(frame) = frame else {
                 return vec![(0.0, 0.0)];
             };
