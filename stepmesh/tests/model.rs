@@ -135,3 +135,145 @@ fn transform_compose_matches_sequential_apply() {
         assert!((0..3).all(|i| (w[i] - p[i]).abs() < 1e-9), "{w:?} {p:?}");
     }
 }
+
+mod topology {
+    use super::*;
+    use stepmesh::internals::{Brep, Loop, Units, decode_brep};
+    use stepmesh::p21::Exchange;
+
+    fn first_brep(x: &Exchange) -> Result<Brep, Error> {
+        let m = decode_model(x)?;
+        let (id, units) = m
+            .parts
+            .iter()
+            .flat_map(|p| &p.breps)
+            .next()
+            .copied()
+            .unwrap();
+        decode_brep(x, id, units)
+    }
+
+    fn brep(name: &str) -> Brep {
+        first_brep(&parse(&fixture(name)).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn box_topology_counts() {
+        let b = brep("box.step");
+        assert_eq!(b.shells.len(), 1);
+        assert_eq!(b.shells[0].faces.len(), 6);
+        assert_eq!(b.edges.len(), 12);
+        let mut vertices: Vec<u64> = b
+            .edges
+            .values()
+            .flat_map(|e| [e.start_vertex, e.end_vertex])
+            .collect();
+        vertices.sort_unstable();
+        vertices.dedup();
+        assert_eq!(vertices.len(), 8);
+        // OpenCascade writes FACE_BOUND even for the outer boundary, so `outer` stays None here.
+        for f in &b.shells[0].faces {
+            assert_eq!(f.loops.len(), 1);
+        }
+    }
+
+    #[test]
+    fn cylinder_seam_edge_used_twice_in_one_loop() {
+        let b = brep("cylinder.step");
+        let twice = b.shells[0].faces.iter().any(|f| {
+            f.loops.iter().any(|(l, _)| match l {
+                Loop::Edges(es) => es
+                    .iter()
+                    .any(|(e, _)| es.iter().filter(|(o, _)| o == e).count() == 2),
+                Loop::Vertex(_) => false,
+            })
+        });
+        assert!(twice);
+    }
+
+    #[test]
+    fn box_with_hole_has_inner_loop() {
+        let b = brep("box_with_hole.step");
+        assert!(b.shells[0].faces.iter().any(|f| f.loops.len() == 2));
+    }
+
+    #[test]
+    fn shelled_box_has_void_shell() {
+        let b = brep("shelled_box.step");
+        assert_eq!(b.shells.len(), 2);
+        assert!(!b.shells[0].void);
+        assert!(b.shells[1].void);
+        assert_eq!(b.shells[1].faces.len(), 6);
+    }
+
+    #[test]
+    fn edge_points_are_scaled() {
+        let x = parse(&fixture("box.step")).unwrap();
+        let m = decode_model(&x).unwrap();
+        let id = m.parts.iter().flat_map(|p| &p.breps).next().unwrap().0;
+        let b = decode_brep(
+            &x,
+            id,
+            Units {
+                length_mm: 2.0,
+                angle_rad: 1.0,
+            },
+        )
+        .unwrap();
+        let max = b
+            .edges
+            .values()
+            .flat_map(|e| [e.start, e.end])
+            .map(|p| p[2])
+            .fold(f64::MIN, f64::max);
+        assert_eq!(max, 30.0, "box is 30 high, ±15 doubled");
+    }
+
+    /// box.step with the surface of its first face wrapped in an OFFSET_SURFACE.
+    fn box_with_offset_surface() -> String {
+        let text = String::from_utf8(fixture("box.step")).unwrap();
+        let line = text.lines().find(|l| l.contains("ADVANCED_FACE(")).unwrap();
+        let (head, tail) = line.rsplit_once(",#").unwrap();
+        let (surface, rest) = tail.split_once(',').unwrap();
+        let new_line = format!("{head},#9999,{rest}");
+        text.replacen(line, &new_line, 1).replacen(
+            "ENDSEC;\nEND-ISO",
+            &format!("#9999 = OFFSET_SURFACE('',#{surface},1.,.F.);\nENDSEC;\nEND-ISO"),
+            1,
+        )
+    }
+
+    #[test]
+    fn offset_surface_is_unsupported() {
+        let x = parse(box_with_offset_surface().as_bytes()).unwrap();
+        assert_eq!(
+            first_brep(&x).err(),
+            Some(Error::Unsupported {
+                entity: "OFFSET_SURFACE".into(),
+                id: 9999
+            })
+        );
+    }
+
+    #[test]
+    fn open_shell_is_rejected() {
+        let text = String::from_utf8(fixture("box.step")).unwrap();
+        let surface_model = text.replace(
+            "MANIFOLD_SOLID_BREP('',#16)",
+            "SHELL_BASED_SURFACE_MODEL('',(#16))",
+        );
+        assert_ne!(surface_model, text);
+        assert!(matches!(
+            model_of(&surface_model),
+            Err(Error::OpenShell { .. })
+        ));
+        let open = text.replace("= CLOSED_SHELL(", "= OPEN_SHELL(");
+        assert_ne!(open, text);
+        let x = parse(open.as_bytes()).unwrap();
+        assert!(matches!(first_brep(&x), Err(Error::OpenShell { .. })));
+    }
+
+    fn model_of(text: &str) -> Result<Model, Error> {
+        decode_model(&parse(text.as_bytes()).unwrap())
+    }
+}

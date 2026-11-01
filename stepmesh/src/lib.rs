@@ -13,7 +13,7 @@ pub use error::Error;
 pub mod internals {
     pub use crate::geom::{Curve, Nurbs1, Nurbs2, Surface, expand_knots};
     pub use crate::model::{
-        Frame, Instance, Model, P3, Part, Transform, Units, decode_curve, decode_model,
-        decode_surface,
+        Brep, Edge, Face, Frame, Instance, Loop, Model, P3, Part, Shell, Transform, Units,
+        decode_brep, decode_curve, decode_model, decode_surface,
     };
 }

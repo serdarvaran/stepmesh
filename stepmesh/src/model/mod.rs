@@ -3,11 +3,13 @@
 mod assembly;
 mod frame;
 mod geometry;
+mod topology;
 mod units;
 
 pub use assembly::decode_model;
 pub use frame::{Frame, P3, Transform};
 pub(crate) use frame::{add, cross, dot, mul, norm, sub, unit};
+pub use topology::{Brep, Edge, Face, Loop, Shell};
 pub use units::Units;
 
 use crate::Error;
@@ -139,4 +141,9 @@ pub fn decode_curve(x: &Exchange, id: u64, units: Units) -> Result<crate::geom::
 /// Surface instance `id` (tests and tools).
 pub fn decode_surface(x: &Exchange, id: u64, units: Units) -> Result<crate::geom::Surface, Error> {
     Decoder::new(x).surface(id, units)
+}
+
+/// B-rep solid instance `id` (tests and tools).
+pub fn decode_brep(x: &Exchange, id: u64, units: Units) -> Result<Brep, Error> {
+    Decoder::new(x).brep(id, units)
 }
