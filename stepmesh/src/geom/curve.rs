@@ -57,10 +57,7 @@ impl Curve {
         match self {
             Curve::Line { .. } => None,
             Curve::Circle { .. } | Curve::Ellipse { .. } => Some(TAU),
-            Curve::Nurbs(n) => {
-                let (t0, t1) = n.range();
-                (dist2(n.derivs(t0).0, n.derivs(t1).0) < 1e-20).then_some(t1 - t0)
-            }
+            Curve::Nurbs(n) => n.closed().then(|| n.range().1 - n.range().0),
         }
     }
 

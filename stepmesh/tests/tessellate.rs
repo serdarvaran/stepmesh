@@ -186,10 +186,7 @@ fn fixture_edges_discretize() {
                 let pts = discretize_edge(e, &o).unwrap();
                 assert!(pts.len() >= 2, "{path:?} #{eid}");
                 for w in pts.windows(2) {
-                    assert!(
-                        dist(w[0], w[1]) > 0.0 || e.start_vertex == e.end_vertex,
-                        "{path:?} #{eid} repeats a point"
-                    );
+                    assert!(dist(w[0], w[1]) > 1e-9, "{path:?} #{eid} repeats a point");
                 }
             }
         }
@@ -401,7 +398,9 @@ mod faces {
                             (a[1] + b[1] + c[1]) / 3.0,
                             (a[2] + b[2] + c[2]) / 3.0,
                         ];
-                        let (u, v) = face.surface.project(centroid, None).unwrap();
+                        let (u, v) = face.surface.project(centroid, None).unwrap_or_else(|| {
+                            panic!("{name} face #{}: no projection for {centroid:?}", face.id)
+                        });
                         let d = dist(face.surface.point(u, v), centroid);
                         assert!(
                             d <= DEFLECTION * 1.5 + 1e-9,

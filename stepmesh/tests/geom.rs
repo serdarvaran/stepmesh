@@ -381,3 +381,106 @@ fn unknown_surface_is_unsupported() {
         })
     );
 }
+
+/// Rational arc swept along z: degree 1 across (u), z = 200 - u, the shape of a ruled face.
+fn ruled_arc() -> Surface {
+    let w = 1.0 / 3.0;
+    let arc = |z: f64| {
+        vec![
+            [-5.0, 0.0, z, 1.0],
+            [-5.0 / 3.0, -10.0 / 3.0, z * w, w],
+            [5.0 / 3.0, -10.0 / 3.0, z * w, w],
+            [5.0, 0.0, z, 1.0],
+        ]
+    };
+    Surface::Nurbs(Nurbs2 {
+        du: 1,
+        dv: 3,
+        ku: vec![0.000_998, 0.000_998, 200.000_998, 200.000_998],
+        kv: expand_knots(&[4, 4], &[0.0, 30.0]),
+        ctrl: vec![arc(200.0), arc(0.0)],
+        closed_u: false,
+        closed_v: false,
+    })
+}
+
+#[test]
+fn projection_on_the_parameter_boundary() {
+    let s = ruled_arc();
+    let [(u0, _), (v0, v1)] = s.param_bounds();
+    let mut hint = None;
+    for i in 0..=300 {
+        let v = v0 + (v1 - v0) * i as f64 / 300.0;
+        let p = s.point(u0, v);
+        let found = s
+            .project(p, hint)
+            .unwrap_or_else(|| panic!("no projection at v = {v} (hint {hint:?})"));
+        assert!(dist(s.point(found.0, found.1), p) < 1e-9);
+        assert!(
+            s.project(p, None).is_some(),
+            "no projection without a hint at v = {v}"
+        );
+        hint = Some(found);
+    }
+}
+
+#[test]
+fn projection_recovers_from_a_misleading_hint() {
+    // Ruled B-spline (degree 1 across): a hint from the far corner must not trap the iteration.
+    let mut rng = Rng(3);
+    let s = Surface::Nurbs(nurbs_patch(&mut rng));
+    let [(u0, u1), (v0, v1)] = s.param_bounds();
+    for i in 0..50 {
+        let (u, v) = (
+            u0 + (u1 - u0) * (i as f64 / 49.0),
+            v0 + (v1 - v0) * ((i * 7 % 50) as f64 / 49.0),
+        );
+        let p = s.point(u, v);
+        for hint in [(u0, v0), (u1, v1), (u0, v1), (u1, v0)] {
+            let (pu, pv) = s.project(p, Some(hint)).expect("projection");
+            assert!(
+                dist(s.point(pu, pv), p) < 1e-9,
+                "({u}, {v}) from hint {hint:?}: ({pu}, {pv})"
+            );
+        }
+    }
+}
+
+#[test]
+fn closed_bspline_curve_wraps_outside_its_range() {
+    let c = Curve::Nurbs(nurbs_circle(3.0));
+    let (t0, t1) = c.param_range();
+    let per = t1 - t0;
+    for i in 0..40 {
+        let t = t0 + per * i as f64 / 40.0;
+        assert!(dist(c.point(t + per), c.point(t)) < 1e-12, "t = {t}");
+        assert!(dist(c.point(t - per), c.point(t)) < 1e-12, "t = {t}");
+    }
+    let s = Surface::Extrusion {
+        curve: c,
+        dir: [0.0, 0.0, 1.0],
+    };
+    assert!(dist(s.point(t1 + 0.3, 1.0), s.point(t0 + 0.3, 1.0)) < 1e-12);
+}
+
+#[test]
+fn projection_of_a_point_just_off_a_boundary() {
+    // An edge sample 1e-8 mm outside the v = v1 boundary of a patch still projects.
+    let mut rng = Rng(9);
+    let s = Surface::Nurbs(nurbs_patch(&mut rng));
+    let [(u0, u1), (_, v1)] = s.param_bounds();
+    for i in 1..20 {
+        let u = u0 + (u1 - u0) * i as f64 / 20.0;
+        let (p, _, sv) = s.derivs(u, v1);
+        let len = dist(sv, [0.0; 3]);
+        let q = [
+            p[0] + sv[0] / len * 1e-8,
+            p[1] + sv[1] / len * 1e-8,
+            p[2] + sv[2] / len * 1e-8,
+        ];
+        let found = s
+            .project(q, Some((u0, v1)))
+            .unwrap_or_else(|| panic!("no projection at u = {u}"));
+        assert!(dist(s.point(found.0, found.1), p) < 1e-6);
+    }
+}

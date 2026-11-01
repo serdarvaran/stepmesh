@@ -32,9 +32,10 @@ pub enum Error {
         count: usize,
         limit: usize,
     },
-    /// A point of a face boundary could not be mapped onto the face's surface.
+    /// A face could not be laid out in its surface's parameter space.
     Projection {
         face: u64,
+        reason: &'static str,
     },
 }
 
@@ -51,9 +52,7 @@ impl fmt::Display for Error {
             Error::TriangleLimit { count, limit } => {
                 write!(f, "{count} triangles exceed the limit of {limit}")
             }
-            Error::Projection { face } => {
-                write!(f, "boundary of face #{face} does not lie on its surface")
-            }
+            Error::Projection { face, reason } => write!(f, "face #{face}: {reason}"),
         }
     }
 }

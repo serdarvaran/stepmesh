@@ -39,16 +39,18 @@ pub fn discretize_edge(e: &Edge, o: &Options) -> Result<Vec<P3>, Error> {
     if ts.len() < 2 {
         ts = vec![t_start, t_end];
     }
-    let last = ts.len() - 1;
-    Ok(ts
-        .iter()
-        .enumerate()
-        .map(|(i, &t)| match i {
-            0 => e.start,
-            i if i == last => e.end,
-            _ => e.curve.point(t),
-        })
-        .collect())
+    // Interior samples that coincide with a neighbour (a knot cut a hair from an end) are
+    // dropped: two mesh vertices at one place would leave a gap between the faces.
+    let same = |a: P3, b: P3| norm(sub(a, b)) <= 1e-9 * (1.0 + norm(a));
+    let mut pts = vec![e.start];
+    for &t in &ts[1..ts.len() - 1] {
+        let p = e.curve.point(t);
+        if !same(p, pts[pts.len() - 1]) && !same(p, e.end) {
+            pts.push(p);
+        }
+    }
+    pts.push(e.end);
+    Ok(pts)
 }
 
 /// Curve parameters of the edge's start and end, in the direction the edge runs.

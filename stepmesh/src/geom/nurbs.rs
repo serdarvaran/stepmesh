@@ -95,6 +95,33 @@ fn basis(span: usize, u: f64, p: usize, k: &[f64]) -> (Vec<f64>, Vec<f64>) {
     (n, d)
 }
 
+fn euclidean(c: [f64; 4]) -> [f64; 3] {
+    [c[0] / c[3], c[1] / c[3], c[2] / c[3]]
+}
+
+fn same_point(a: [f64; 4], b: [f64; 4]) -> bool {
+    let (p, q) = (euclidean(a), euclidean(b));
+    let d: f64 = (0..3).map(|i| (p[i] - q[i]).powi(2)).sum();
+    let s: f64 = p.iter().map(|x| x * x).sum();
+    d <= 1e-20 * (1.0 + s)
+}
+
+/// End knots repeated `degree + 1` times: the curve starts and ends at its end control points.
+fn clamped(k: &[f64], p: usize) -> bool {
+    k.len() > 2 * p + 1
+        && k[..=p].iter().all(|&x| x == k[0])
+        && k[k.len() - 1 - p..].iter().all(|&x| x == k[k.len() - 1])
+}
+
+/// `t` moved into `[t0, t1)` by whole periods.
+fn wrap(t: f64, (t0, t1): (f64, f64)) -> f64 {
+    if t < t0 || t > t1 {
+        t0 + (t - t0).rem_euclid(t1 - t0)
+    } else {
+        t
+    }
+}
+
 fn rational(a: [f64; 4], da: [f64; 4]) -> ([f64; 3], [f64; 3]) {
     let w = a[3];
     let p = [a[0] / w, a[1] / w, a[2] / w];
@@ -111,8 +138,28 @@ impl Nurbs1 {
         (self.knots[self.degree], self.knots[self.ctrl.len()])
     }
 
+    /// Whether the curve ends where it starts (then parameters outside the range wrap round).
+    pub fn closed(&self) -> bool {
+        let (first, last) = (self.ctrl[0], self.ctrl[self.ctrl.len() - 1]);
+        if clamped(&self.knots, self.degree) {
+            return same_point(first, last);
+        }
+        let (t0, t1) = self.range();
+        let (a, b) = (self.at(t0).0, self.at(t1).0);
+        (0..3).map(|i| (a[i] - b[i]).powi(2)).sum::<f64>()
+            <= 1e-20 * (1.0 + a.iter().map(|x| x * x).sum::<f64>())
+    }
+
     /// Point and first derivative.
     pub fn derivs(&self, t: f64) -> ([f64; 3], [f64; 3]) {
+        let (t0, t1) = self.range();
+        if (t < t0 || t > t1) && self.closed() {
+            return self.at(wrap(t, (t0, t1)));
+        }
+        self.at(t)
+    }
+
+    fn at(&self, t: f64) -> ([f64; 3], [f64; 3]) {
         let n = self.ctrl.len() - 1;
         let s = find_span(n, self.degree, t, &self.knots);
         let (b, db) = basis(s, t, self.degree, &self.knots);
@@ -137,8 +184,38 @@ impl Nurbs2 {
         ]
     }
 
-    /// Point and the partial derivatives along u and v.
+    /// Whether the surface closes on itself along u (first and last rows of control points
+    /// coincide on a clamped knot vector).
+    pub fn closed_along_u(&self) -> bool {
+        clamped(&self.ku, self.du)
+            && self.ctrl[0]
+                .iter()
+                .zip(&self.ctrl[self.ctrl.len() - 1])
+                .all(|(&a, &b)| same_point(a, b))
+    }
+
+    pub fn closed_along_v(&self) -> bool {
+        clamped(&self.kv, self.dv)
+            && self
+                .ctrl
+                .iter()
+                .all(|row| same_point(row[0], row[row.len() - 1]))
+    }
+
+    /// Point and the partial derivatives along u and v; parameters outside the range of a closed
+    /// direction wrap round.
     pub fn derivs(&self, u: f64, v: f64) -> ([f64; 3], [f64; 3], [f64; 3]) {
+        let [ru, rv] = self.range();
+        let u = if (u < ru.0 || u > ru.1) && self.closed_along_u() {
+            wrap(u, ru)
+        } else {
+            u
+        };
+        let v = if (v < rv.0 || v > rv.1) && self.closed_along_v() {
+            wrap(v, rv)
+        } else {
+            v
+        };
         let (nu, nv) = (self.ctrl.len() - 1, self.ctrl[0].len() - 1);
         let su = find_span(nu, self.du, u, &self.ku);
         let sv = find_span(nv, self.dv, v, &self.kv);

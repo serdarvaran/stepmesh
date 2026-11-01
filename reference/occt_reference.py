@@ -4,7 +4,9 @@
 
 Each line: {file, ok, solids, volume, area, min, max, valid} in millimetres, with the exact B-rep
 volume and area (BRepGProp), or {file, ok: false, error}. Solids are counted after the reader has
-applied assembly placements, so an instanced part counts once per instance.
+applied assembly placements, so an instanced part counts once per instance. The bounds come from
+a fine OpenCascade mesh (deflection 1e-4 of the diagonal, at least 0.01 mm): Bnd_Box, even the
+"optimal" one, can reach past trimmed B-spline faces.
 """
 
 import json
@@ -14,13 +16,17 @@ from pathlib import Path
 from OCP.Bnd import Bnd_Box
 from OCP.BRepBndLib import BRepBndLib
 from OCP.BRepCheck import BRepCheck_Analyzer
+from OCP.BRep import BRep_Tool
 from OCP.BRepGProp import BRepGProp
+from OCP.BRepMesh import BRepMesh_IncrementalMesh
 from OCP.GProp import GProp_GProps
 from OCP.IFSelect import IFSelect_RetDone
 from OCP.Interface import Interface_Static
 from OCP.STEPControl import STEPControl_Reader
-from OCP.TopAbs import TopAbs_SOLID
+from OCP.TopAbs import TopAbs_FACE, TopAbs_SOLID
 from OCP.TopExp import TopExp_Explorer
+from OCP.TopLoc import TopLoc_Location
+from OCP.TopoDS import TopoDS
 
 
 def measure(path):
@@ -49,8 +55,28 @@ def measure(path):
         valid = valid and BRepCheck_Analyzer(s).IsValid()
         BRepBndLib.AddOptimal_s(s, box, False, False)
     xmin, ymin, zmin, xmax, ymax, zmax = box.Get()
+    lo, hi = mesh_bounds(shape, max(0.01, 1e-4 * ((xmax - xmin) ** 2 + (ymax - ymin) ** 2 + (zmax - zmin) ** 2) ** 0.5))
+    if lo is None:
+        lo, hi = [xmin, ymin, zmin], [xmax, ymax, zmax]
     return {"ok": True, "solids": len(solids), "volume": volume, "area": area,
-            "min": [xmin, ymin, zmin], "max": [xmax, ymax, zmax], "valid": valid}
+            "min": lo, "max": hi, "valid": valid}
+
+
+def mesh_bounds(shape, deflection):
+    BRepMesh_IncrementalMesh(shape, deflection, False, 0.5, True)
+    lo, hi = [float("inf")] * 3, [float("-inf")] * 3
+    faces = TopExp_Explorer(shape, TopAbs_FACE)
+    while faces.More():
+        loc = TopLoc_Location()
+        tri = BRep_Tool.Triangulation_s(TopoDS.Face_s(faces.Current()), loc)
+        if tri is not None:
+            trsf = loc.Transformation()
+            for i in range(1, tri.NbNodes() + 1):
+                p = tri.Node(i).Transformed(trsf)
+                for k, c in enumerate((p.X(), p.Y(), p.Z())):
+                    lo[k], hi[k] = min(lo[k], c), max(hi[k], c)
+        faces.Next()
+    return (lo, hi) if lo[0] != float("inf") else (None, None)
 
 
 def main():

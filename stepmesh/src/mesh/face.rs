@@ -59,11 +59,11 @@ pub fn tessellate_face(
         o,
         inner: Vec::new(),
     };
-    let fail = Error::Projection { face: f.id };
     let mut loops = Vec::new();
     for (l, orientation) in &f.loops {
         if let Loop::Edges(list) = l {
-            let pts = loop_points(list, *orientation, edges).ok_or_else(|| fail.clone())?;
+            let pts = loop_points(list, *orientation, edges)
+                .ok_or_else(|| Ctx::error(f.id, "a loop edge has no polyline"))?;
             loops.push(c.map_loop(&pts)?);
         }
     }
@@ -71,7 +71,10 @@ pub fn tessellate_face(
         loops = c.full_domain()?;
     } else if loops.iter().any(|l| c.wraps(l)) {
         // A loop around a periodic surface without a seam edge: not handled yet.
-        return Err(fail);
+        return Err(Ctx::error(
+            f.id,
+            "a loop goes round a periodic surface without a seam",
+        ));
     }
     c.align(&mut loops);
     c.triangulate(&loops)
@@ -106,8 +109,12 @@ fn loop_points(
 }
 
 impl Ctx<'_> {
-    fn fail(&self) -> Error {
-        Error::Projection { face: self.f.id }
+    fn error(face: u64, reason: &'static str) -> Error {
+        Error::Projection { face, reason }
+    }
+
+    fn fail(&self, reason: &'static str) -> Error {
+        Ctx::error(self.f.id, reason)
     }
 
     /// Whether the surface collapses along u (or v) at this parameter point.
@@ -125,9 +132,12 @@ impl Ctx<'_> {
         let mut sing = vec![(false, false); pts.len()];
         let mut hint = None;
         for (i, &(_, p)) in pts.iter().enumerate() {
-            let q = self.s.project(p, hint).ok_or_else(|| self.fail())?;
+            let q = self
+                .s
+                .project(p, hint)
+                .ok_or_else(|| self.fail("projection onto the surface did not converge"))?;
             if norm(sub(self.s.point(q.0, q.1), p)) > ON_SURFACE {
-                return Err(self.fail());
+                return Err(self.fail("a boundary point lies off the surface"));
             }
             sing[i] = self.singular(q);
             uv[i] = Some(q);
@@ -138,7 +148,7 @@ impl Ctx<'_> {
         let n = pts.len();
         let regular = |i: usize| !sing[i].0 && !sing[i].1;
         if !(0..n).any(regular) {
-            return Err(self.fail());
+            return Err(self.fail("the loop has no regular point"));
         }
         let neighbour = |i: usize, step: isize| {
             let mut j = i;
@@ -233,13 +243,13 @@ impl Ctx<'_> {
         let (pu, pv) = self.s.period();
         let [(_, _), (vb0, vb1)] = self.s.param_bounds();
         let Some(pu) = pu else {
-            return Err(self.fail());
+            return Err(self.fail("the surface is closed but not periodic"));
         };
         let (u0, u1) = (0.0, pu);
         let (v0, v1) = match pv {
             Some(p) => (0.0, p),
             None if vb0.is_finite() && vb1.is_finite() => (vb0, vb1),
-            None => return Err(self.fail()),
+            None => return Err(self.fail("the surface has no finite parameter range")),
         };
         let s = self.s.clone();
         let o = self.o.clone();
@@ -336,11 +346,11 @@ impl Ctx<'_> {
          -> Result<FixedVertexHandle, Error> {
             let h = cdt
                 .insert(Point2::new(b.uv.0 * su, b.uv.1 * sv))
-                .map_err(|_| Error::Projection { face })?;
+                .map_err(|_| Ctx::error(face, "a parameter point cannot be triangulated"))?;
             if h.index() == info.len() {
                 info.push(b);
             } else if info[h.index()].r != b.r && norm(sub(info[h.index()].p, b.p)) > ON_SURFACE {
-                return Err(Error::Projection { face });
+                return Err(Ctx::error(face, "two boundary points share parameters"));
             }
             Ok(h)
         };
@@ -352,7 +362,7 @@ impl Ctx<'_> {
             for i in 0..handles.len() {
                 let (a, b) = (handles[i], handles[(i + 1) % handles.len()]);
                 if a != b && !cdt.can_add_constraint(a, b) && !cdt.exists_constraint(a, b) {
-                    return Err(self.fail());
+                    return Err(self.fail("the boundary crosses itself in parameter space"));
                 }
                 if a != b && !cdt.exists_constraint(a, b) {
                     cdt.add_constraint(a, b);

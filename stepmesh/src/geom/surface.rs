@@ -186,17 +186,10 @@ impl Surface {
             Surface::Torus { .. } => (Some(TAU), Some(TAU)),
             Surface::Nurbs(n) => {
                 let [(u0, u1), (v0, v1)] = n.range();
-                let closed_u = n.closed_u
-                    && (0..5).all(|i| {
-                        let v = v0 + (v1 - v0) * i as f64 / 4.0;
-                        dist2(n.derivs(u0, v).0, n.derivs(u1, v).0) < 1e-14
-                    });
-                let closed_v = n.closed_v
-                    && (0..5).all(|i| {
-                        let u = u0 + (u1 - u0) * i as f64 / 4.0;
-                        dist2(n.derivs(u, v0).0, n.derivs(u, v1).0) < 1e-14
-                    });
-                (closed_u.then_some(u1 - u0), closed_v.then_some(v1 - v0))
+                (
+                    n.closed_along_u().then_some(u1 - u0),
+                    n.closed_along_v().then_some(v1 - v0),
+                )
             }
             Surface::Extrusion { curve, .. } => (curve.period(), None),
             Surface::Revolution { curve, .. } => (Some(TAU), curve.period()),
@@ -257,7 +250,27 @@ impl Surface {
                 let q = sub(sub(p, f.origin), mul(e, *major));
                 (u, dot(q, f.z).atan2(dot(q, e)).rem_euclid(TAU))
             }
-            _ => self.newton(p, hint.unwrap_or_else(|| self.start(p)))?,
+            _ => {
+                // From the hint first; from a grid when that fails or stops short of the point.
+                let from_hint = hint.and_then(|h| self.newton(p, h));
+                let near = |q: (f64, f64)| dist2(self.point(q.0, q.1), p);
+                match from_hint {
+                    Some(q) if near(q) <= 1e-12 * (1.0 + dot(p, p)) => q,
+                    _ => {
+                        let from_grid = self.newton(p, self.start(p));
+                        match (from_hint, from_grid) {
+                            (Some(a), Some(b)) => {
+                                if near(a) <= near(b) {
+                                    a
+                                } else {
+                                    b
+                                }
+                            }
+                            (a, b) => a.or(b)?,
+                        }
+                    }
+                }
+            }
         };
         let (pu, pv) = self.period();
         Some(match hint {
@@ -330,16 +343,23 @@ impl Surface {
     }
 
     /// Gauss–Newton on the squared distance with step halving; non-periodic parameters stay in
-    /// bounds.
+    /// bounds, and a parameter held at its bound by the step leaves the other to move alone.
     fn newton(&self, p: P3, (mut u, mut v): (f64, f64)) -> Option<(f64, f64)> {
         let [(u0, u1), (v0, v1)] = self.param_bounds();
         let (pu, pv) = self.period();
         let keep = |x: f64, lo: f64, hi: f64, per: Option<f64>| {
             if per.is_some() { x } else { x.clamp(lo, hi) }
         };
+        let pinned = |x: f64, step: f64, lo: f64, hi: f64, per: Option<f64>| {
+            per.is_none() && ((x <= lo && step < 0.0) || (x >= hi && step > 0.0))
+        };
+        let close = 1e-12 * (1.0 + norm(p));
         for _ in 0..NEWTON_STEPS {
             let (s, su, sv) = self.derivs(u, v);
             let r = sub(p, s);
+            if norm(r) <= close {
+                return Some((u, v));
+            }
             let (a, b, c) = (dot(su, su), dot(su, sv), dot(sv, sv));
             let (g1, g2) = (dot(su, r), dot(sv, r));
             let det = a * c - b * b;
@@ -352,6 +372,19 @@ impl Surface {
             } else {
                 return None;
             };
+            if pinned(u, du, u0, u1, pu) {
+                (du, dv) = (0.0, if c > 0.0 { g2 / c } else { 0.0 });
+            }
+            if pinned(v, dv, v0, v1, pv) {
+                (du, dv) = (
+                    if a > 0.0 && !pinned(u, g1, u0, u1, pu) {
+                        g1 / a
+                    } else {
+                        0.0
+                    },
+                    0.0,
+                );
+            }
             let before = dot(r, r);
             let (mut nu, mut nv) = (u, v);
             for _ in 0..30 {
@@ -365,15 +398,37 @@ impl Surface {
             }
             let moved = (nu - u).abs().max((nv - v).abs());
             (u, v) = (nu, nv);
-            if moved <= 1e-15 * (1.0 + u.abs().max(v.abs())) {
-                return Some((u, v));
+            if moved <= 1e-13 * (1.0 + u.abs().max(v.abs())) {
+                break;
             }
         }
-        // Accept a slow finish when the gradient has vanished (point off a curved surface).
+        // Settled: on the surface, or where the free directions are at right angles to the
+        // remaining distance (a point off a curved surface or beyond its boundary).
         let (s, su, sv) = self.derivs(u, v);
         let r = sub(p, s);
-        let scale = norm(r).max(1e-9);
-        let grad_ok = |d: P3| dot(d, r).abs() <= 1e-9 * norm(d).max(1e-300) * scale;
-        (grad_ok(su) && grad_ok(sv)).then_some((u, v))
+        let nr = norm(r);
+        // Within a micrometre: an edge sample a hair off its face (callers check the distance).
+        if nr <= 1e-6 * (1.0 + norm(p)) {
+            return Some((u, v));
+        }
+        // Otherwise stationary when the Gauss–Newton step, with the parameters held at a bound
+        // dropped, would move the point by less than the arithmetic can resolve.
+        let held =
+            |x: f64, lo: f64, hi: f64, per: Option<f64>| per.is_none() && (x <= lo || x >= hi);
+        let (hu, hv) = (held(u, u0, u1, pu), held(v, v0, v1, pv));
+        let (a, b, c) = (dot(su, su), dot(su, sv), dot(sv, sv));
+        let (g1, g2) = (dot(su, r), dot(sv, r));
+        let det = a * c - b * b;
+        let step = match (hu, hv) {
+            (true, true) => [0.0; 3],
+            (true, false) if c > 0.0 => mul(sv, g2 / c),
+            (false, true) if a > 0.0 => mul(su, g1 / a),
+            (false, false) if det > 0.0 => add(
+                mul(su, (c * g1 - b * g2) / det),
+                mul(sv, (a * g2 - b * g1) / det),
+            ),
+            _ => return None,
+        };
+        (norm(step) <= 1e-9 * (1.0 + norm(p))).then_some((u, v))
     }
 }

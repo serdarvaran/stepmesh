@@ -115,6 +115,7 @@ fn error_class(e: &Error) -> String {
         Error::Unsupported { entity, .. } => format!("Unsupported {entity}"),
         Error::Syntax { .. } => "Syntax".into(),
         Error::Invalid { msg, .. } => format!("Invalid ({msg})"),
+        Error::Projection { reason, .. } => format!("Projection: {reason}"),
         other => format!("{other:?}")
             .split([' ', '{', '('])
             .next()
