@@ -6,7 +6,7 @@ Each line: {file, ok, solids, volume, mesh_volume, area, min, max, valid} in mil
 exact B-rep volume and area (BRepGProp), the volume of OpenCascade's own mesh at stepmesh's default
 tolerances (0.003 mm, 0.5 rad), or {file, ok: false, error}. Solids are counted after the reader has
 applied assembly placements, so an instanced part counts once per instance. The bounds come from
-a fine OpenCascade mesh (deflection 1e-4 of the diagonal, at least 0.01 mm): Bnd_Box, even the
+a fine OpenCascade mesh of the solids alone (deflection 1e-4 of the diagonal, at least 0.01 mm): Bnd_Box, even the
 "optimal" one, can reach past trimmed B-spline faces.
 """
 
@@ -17,7 +17,7 @@ from pathlib import Path
 from OCP.Bnd import Bnd_Box
 from OCP.BRepBndLib import BRepBndLib
 from OCP.BRepCheck import BRepCheck_Analyzer
-from OCP.BRep import BRep_Tool
+from OCP.BRep import BRep_Builder, BRep_Tool
 from OCP.BRepGProp import BRepGProp
 from OCP.BRepMesh import BRepMesh_IncrementalMesh
 from OCP.GProp import GProp_GProps
@@ -27,7 +27,7 @@ from OCP.STEPControl import STEPControl_Reader
 from OCP.TopAbs import TopAbs_FACE, TopAbs_REVERSED, TopAbs_SOLID
 from OCP.TopExp import TopExp_Explorer
 from OCP.TopLoc import TopLoc_Location
-from OCP.TopoDS import TopoDS
+from OCP.TopoDS import TopoDS, TopoDS_Compound
 
 
 def measure(path):
@@ -56,6 +56,12 @@ def measure(path):
         valid = valid and BRepCheck_Analyzer(s).IsValid()
         BRepBndLib.AddOptimal_s(s, box, False, False)
     xmin, ymin, zmin, xmax, ymax, zmax = box.Get()
+    # Surface models next to the solids have no volume; stepmesh ignores them, so measure solids only.
+    shape = TopoDS_Compound()
+    builder = BRep_Builder()
+    builder.MakeCompound(shape)
+    for s in solids:
+        builder.Add(shape, s)
     lo, hi = mesh_bounds(shape, max(0.01, 1e-4 * ((xmax - xmin) ** 2 + (ymax - ymin) ** 2 + (zmax - zmin) ** 2) ** 0.5))
     if lo is None:
         lo, hi = [xmin, ymin, zmin], [xmax, ymax, zmax]

@@ -52,6 +52,14 @@ impl Curve {
         }
     }
 
+    /// Interior knots of a B-spline, ascending and distinct: the curve is smooth between them.
+    pub fn breaks(&self) -> Vec<f64> {
+        match self {
+            Curve::Nurbs(n) => interior_knots(&n.knots, n.range()),
+            _ => Vec::new(),
+        }
+    }
+
     /// Period of a closed curve: conics, and B-splines that end where they start.
     pub fn period(&self) -> Option<f64> {
         match self {
@@ -130,4 +138,11 @@ pub(crate) fn angle(f: &Frame, p: P3, a: f64, b: f64) -> f64 {
 pub(crate) fn dist2(a: P3, b: P3) -> f64 {
     let d = sub(a, b);
     dot(d, d)
+}
+
+/// Distinct knots strictly inside `range`, ascending.
+pub(crate) fn interior_knots(knots: &[f64], (lo, hi): (f64, f64)) -> Vec<f64> {
+    let mut out: Vec<f64> = knots.iter().copied().filter(|&k| k > lo && k < hi).collect();
+    out.dedup();
+    out
 }

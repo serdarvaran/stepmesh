@@ -16,26 +16,18 @@ pub fn discretize_edge(e: &Edge, o: &Options) -> Result<Vec<P3>, Error> {
         Curve::Line { .. } => vec![t_start, t_end],
         Curve::Circle { r, .. } => uniform(t_start, t_end, *r, o)?,
         Curve::Ellipse { a, b, .. } => uniform(t_start, t_end, a.max(*b), o)?,
-        Curve::Nurbs(n) => {
-            let mut cuts = vec![t_start];
+        Curve::Nurbs(_) => {
             let (lo, hi) = (t_start.min(t_end), t_start.max(t_end));
-            let mut knots: Vec<f64> = n
-                .knots
-                .iter()
-                .copied()
+            let mut cuts: Vec<f64> = e
+                .curve
+                .breaks()
+                .into_iter()
                 .filter(|&k| k > lo && k < hi)
                 .collect();
-            knots.dedup();
             if t_end < t_start {
-                knots.reverse();
+                cuts.reverse();
             }
-            cuts.extend(knots);
-            cuts.push(t_end);
-            let mut ts = vec![t_start];
-            for w in cuts.windows(2) {
-                adaptive(&|t| e.curve.derivs(t), w[0], w[1], o, 0, &mut ts);
-            }
-            ts
+            sample_curve(&|t| e.curve.derivs(t), t_start, t_end, &cuts, o)
         }
     };
     if ts.len() < 2 {
@@ -102,9 +94,22 @@ fn uniform(t0: f64, t1: f64, r: f64, o: &Options) -> Result<Vec<f64>, Error> {
 }
 
 /// Parameters from `a` to `b` (both included) of a curve given by point and derivative.
-pub(crate) fn sample_curve(c: &dyn Fn(f64) -> (P3, P3), a: f64, b: f64, o: &Options) -> Vec<f64> {
+/// `cuts`, strictly between `a` and `b` in order from `a`, are where the curve may stop being
+/// smooth (knots): sampling starts from them, since a curve made of several pieces can return
+/// to its chord at every test point of one bisection step.
+pub(crate) fn sample_curve(
+    c: &dyn Fn(f64) -> (P3, P3),
+    a: f64,
+    b: f64,
+    cuts: &[f64],
+    o: &Options,
+) -> Vec<f64> {
     let mut out = vec![a];
-    adaptive(c, a, b, o, 0, &mut out);
+    let mut from = a;
+    for &t in cuts.iter().chain([&b]) {
+        adaptive(c, from, t, o, 0, &mut out);
+        from = t;
+    }
     out
 }
 

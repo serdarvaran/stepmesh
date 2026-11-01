@@ -1,6 +1,6 @@
 use std::f64::consts::{FRAC_PI_2, TAU};
 
-use super::curve::{Curve, angle, dist2};
+use super::curve::{Curve, angle, dist2, interior_knots};
 use super::nurbs::Nurbs2;
 use crate::model::{Frame, P3, add, cross, dot, mul, norm, sub, unit};
 
@@ -195,6 +195,19 @@ impl Surface {
             }
             Surface::Extrusion { curve, .. } => (curve.period(), None),
             Surface::Revolution { curve, .. } => (Some(TAU), curve.period()),
+        }
+    }
+
+    /// Interior knots along u and along v (see [`Curve::breaks`]).
+    pub fn breaks(&self) -> [Vec<f64>; 2] {
+        match self {
+            Surface::Nurbs(n) => {
+                let [ru, rv] = n.range();
+                [interior_knots(&n.ku, ru), interior_knots(&n.kv, rv)]
+            }
+            Surface::Extrusion { curve, .. } => [curve.breaks(), Vec::new()],
+            Surface::Revolution { curve, .. } => [Vec::new(), curve.breaks()],
+            _ => [Vec::new(), Vec::new()],
         }
     }
 

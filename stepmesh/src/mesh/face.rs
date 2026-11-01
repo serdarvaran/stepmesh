@@ -381,14 +381,8 @@ impl Ctx<'_> {
     /// Points strictly between two parameter points, along the straight line joining them, at
     /// the edge tolerances (new face vertices).
     fn seam_points(&mut self, from: (f64, f64), to: (f64, f64)) -> Vec<BPoint> {
-        let s = self.s.clone();
         let at = |t: f64| (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t);
-        let curve = |t: f64| {
-            let (u, v) = at(t);
-            let (p, su, sv) = s.derivs(u, v);
-            (p, add(mul(su, to.0 - from.0), mul(sv, to.1 - from.1)))
-        };
-        let ts = sample_curve(&curve, 0.0, 1.0, self.o);
+        let ts = self.segment_params(from, to);
         ts[1..ts.len() - 1]
             .iter()
             .map(|&t| {
@@ -403,6 +397,47 @@ impl Ctx<'_> {
                 }
             })
             .collect()
+    }
+
+    /// Parameters (0 to 1) along the straight parameter line from `from` to `to` at the edge
+    /// tolerances, starting from where it crosses the surface's knot lines.
+    fn segment_params(&self, from: (f64, f64), to: (f64, f64)) -> Vec<f64> {
+        let s = self.s;
+        let (period, breaks) = (s.period(), s.breaks());
+        let mut cuts = Vec::new();
+        for (a, b, p, knots) in [
+            (from.0, to.0, period.0, &breaks[0]),
+            (from.1, to.1, period.1, &breaks[1]),
+        ] {
+            if a == b {
+                continue;
+            }
+            let (lo, hi) = (a.min(b), a.max(b));
+            for &k in knots {
+                // A periodic parameter meets the knot once per period it runs through.
+                let mut x = match p {
+                    Some(p) => k + ((lo - k) / p).floor() * p,
+                    None => k,
+                };
+                loop {
+                    if x > lo && x < hi {
+                        cuts.push((x - a) / (b - a));
+                    }
+                    match p {
+                        Some(p) if x < hi => x += p,
+                        _ => break,
+                    }
+                }
+            }
+        }
+        cuts.sort_by(f64::total_cmp);
+        cuts.dedup();
+        let curve = |t: f64| {
+            let (u, v) = (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t);
+            let (p, su, sv) = s.derivs(u, v);
+            (p, add(mul(su, to.0 - from.0), mul(sv, to.1 - from.1)))
+        };
+        sample_curve(&curve, 0.0, 1.0, &cuts, self.o)
     }
 
     /// Shifts every loop by whole periods next to the one with the widest parameter range.
@@ -465,35 +500,25 @@ impl Ctx<'_> {
             None => return Err(self.fail("the surface has no finite parameter range")),
         };
         let s = self.s.clone();
-        let o = self.o.clone();
         // Side samples (parameters) along u at v = v0 and along v at u = u0.
         let bottom_collapsed = self.singular((u0, v0)).0;
         let top_collapsed = self.singular((u0, v1)).0;
-        let us = if bottom_collapsed {
+        let us: Vec<f64> = if bottom_collapsed {
             let n = self.pole_steps(pu);
             (0..=n)
                 .map(|i| u0 + (u1 - u0) * i as f64 / n as f64)
                 .collect()
         } else {
-            sample_curve(
-                &|u| {
-                    let (p, su, _) = s.derivs(u, v0);
-                    (p, su)
-                },
-                u0,
-                u1,
-                &o,
-            )
+            self.segment_params((u0, v0), (u1, v0))
+                .iter()
+                .map(|t| u0 + (u1 - u0) * t)
+                .collect()
         };
-        let vs = sample_curve(
-            &|v| {
-                let (p, _, sv) = s.derivs(u0, v);
-                (p, sv)
-            },
-            v0,
-            v1,
-            &o,
-        );
+        let vs: Vec<f64> = self
+            .segment_params((u0, v0), (u0, v1))
+            .iter()
+            .map(|t| v0 + (v1 - v0) * t)
+            .collect();
         // Left side (u = u0) shared with the right side (u = u1).
         let side_v: Vec<VRef> = vs.iter().map(|&v| self.new_inner(s.point(u0, v))).collect();
         let last = us.len() - 1;
