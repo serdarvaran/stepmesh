@@ -2,8 +2,9 @@
 
     python reference/occt_reference.py <list-of-paths.txt | file.step ...> <out.jsonl>
 
-Each line: {file, ok, solids, volume, area, min, max, valid} in millimetres, with the exact B-rep
-volume and area (BRepGProp), or {file, ok: false, error}. Solids are counted after the reader has
+Each line: {file, ok, solids, volume, mesh_volume, area, min, max, valid} in millimetres, with the
+exact B-rep volume and area (BRepGProp), the volume of OpenCascade's own mesh at stepmesh's default
+tolerances (0.003 mm, 0.5 rad), or {file, ok: false, error}. Solids are counted after the reader has
 applied assembly placements, so an instanced part counts once per instance. The bounds come from
 a fine OpenCascade mesh (deflection 1e-4 of the diagonal, at least 0.01 mm): Bnd_Box, even the
 "optimal" one, can reach past trimmed B-spline faces.
@@ -23,7 +24,7 @@ from OCP.GProp import GProp_GProps
 from OCP.IFSelect import IFSelect_RetDone
 from OCP.Interface import Interface_Static
 from OCP.STEPControl import STEPControl_Reader
-from OCP.TopAbs import TopAbs_FACE, TopAbs_SOLID
+from OCP.TopAbs import TopAbs_FACE, TopAbs_REVERSED, TopAbs_SOLID
 from OCP.TopExp import TopExp_Explorer
 from OCP.TopLoc import TopLoc_Location
 from OCP.TopoDS import TopoDS
@@ -58,8 +59,31 @@ def measure(path):
     lo, hi = mesh_bounds(shape, max(0.01, 1e-4 * ((xmax - xmin) ** 2 + (ymax - ymin) ** 2 + (zmax - zmin) ** 2) ** 0.5))
     if lo is None:
         lo, hi = [xmin, ymin, zmin], [xmax, ymax, zmax]
-    return {"ok": True, "solids": len(solids), "volume": volume, "area": area,
-            "min": lo, "max": hi, "valid": valid}
+    return {"ok": True, "solids": len(solids), "volume": volume, "mesh_volume": mesh_volume(shape),
+            "area": area, "min": lo, "max": hi, "valid": valid}
+
+
+def mesh_volume(shape):
+    """Signed volume of OpenCascade's mesh at 0.003 mm / 0.5 rad, the tolerances stepmesh uses."""
+    BRepMesh_IncrementalMesh(shape, 0.003, False, 0.5, True)
+    total = 0.0
+    faces = TopExp_Explorer(shape, TopAbs_FACE)
+    while faces.More():
+        face = TopoDS.Face_s(faces.Current())
+        loc = TopLoc_Location()
+        tri = BRep_Tool.Triangulation_s(face, loc)
+        if tri is None:
+            return None
+        trsf = loc.Transformation()
+        for i in range(1, tri.NbTriangles() + 1):
+            a, b, c = tri.Triangle(i).Get()
+            if face.Orientation() == TopAbs_REVERSED:
+                b, c = c, b
+            (ax, ay, az), (bx, by, bz), (cx, cy, cz) = (
+                (q.X(), q.Y(), q.Z()) for q in (tri.Node(k).Transformed(trsf) for k in (a, b, c)))
+            total += (ax * (by * cz - bz * cy) - ay * (bx * cz - bz * cx) + az * (bx * cy - by * cx)) / 6.0
+        faces.Next()
+    return total
 
 
 def mesh_bounds(shape, deflection):

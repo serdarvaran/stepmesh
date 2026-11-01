@@ -13,8 +13,9 @@ use crate::{Error, Options};
 /// Refinement passes over the face; each inserts the centroid or edge midpoints of every
 /// triangle that is still too far from the surface.
 const MAX_REFINE_ROUNDS: usize = 40;
-/// A boundary point may lie this far from the face's surface (file tolerance).
-const ON_SURFACE: f64 = 0.05;
+/// A boundary point may lie this far from the face's surface: files carry edge curves that
+/// leave their faces by their modelling tolerance (0.08 mm seen in CAx-IF test data).
+const ON_SURFACE: f64 = 0.1;
 
 /// A mesh vertex: a sample of an edge polyline (shared with the neighbouring face) or a point
 /// of this face only.

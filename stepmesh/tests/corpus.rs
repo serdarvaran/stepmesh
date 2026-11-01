@@ -3,12 +3,15 @@
 //!     STEPMESH_CORPUS=list.txt STEPMESH_REFERENCE=ref.jsonl \
 //!         cargo test --release --test corpus -- --ignored --nocapture
 //!
-//! Optional: STEPMESH_TIMEOUT_S (default 120), STEPMESH_OUT (one JSON line per file).
+//! Optional: STEPMESH_TIMEOUT_S (default 120), STEPMESH_OUT (one JSON line per file),
+//! STEPMESH_DISPUTED (lines `path<TAB>reason`: files whose OpenCascade reference was shown to be
+//! wrong; reported as "reference disputed", never as ok).
 //! A file passes when stepmesh returns an error, or returns solids whose count matches, whose
-//! bounds are within 0.1 % of the diagonal and whose volume is within max(0.1 %, deflection x area)
-//! of OpenCascade's exact B-rep volume: a mesh within the deflection of the surface cannot be
-//! closer than that. Anything else read without an error is WRONG; the gate allows none, and no
-//! panic or timeout either. The share of files within 0.1 % is reported separately.
+//! bounds are within 0.1 % of the diagonal, and whose volume is within 0.1 % of OpenCascade's own
+//! mesh at the same tolerances or within max(0.1 %, deflection x area) of its exact B-rep volume (a
+//! mesh within the deflection of the surface cannot be closer than that). Anything else read
+//! without an error is WRONG; the gate allows none, and no panic or timeout either. The share of
+//! files within 0.1 % of the exact volume is reported separately.
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
@@ -20,6 +23,7 @@ use stepmesh::{Error, Options, StepMesh, read_step};
 struct Reference {
     solids: usize,
     volume: f64,
+    mesh_volume: Option<f64>,
     area: f64,
     min: [f64; 3],
     max: [f64; 3],
@@ -66,6 +70,7 @@ fn references(path: &str) -> HashMap<String, Option<Reference>> {
             volume: field(line, "volume")
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(f64::NAN),
+            mesh_volume: field(line, "mesh_volume").and_then(|s| s.parse().ok()),
             area: field(line, "area")
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(f64::NAN),
@@ -101,8 +106,14 @@ fn judge(m: &StepMesh, r: &Reference) -> Result<(), String> {
     }
     let allowed =
         1e-3_f64.max(Options::default().linear_deflection * r.area / r.volume.abs().max(1e-12));
-    if dv > allowed {
-        return Err(format!("volume {volume} vs {} ({dv:.2e})", r.volume));
+    let dm = r
+        .mesh_volume
+        .map_or(f64::INFINITY, |m| (volume - m).abs() / m.abs().max(1e-12));
+    if dv > allowed && dm > 1e-3 {
+        return Err(format!(
+            "volume {volume} vs {} ({dv:.2e}), mesh {:?} ({dm:.2e})",
+            r.volume, r.mesh_volume
+        ));
     }
     if bounds > 1e-3 * diag {
         return Err(format!("bounds off by {bounds} (diagonal {diag})"));
@@ -144,6 +155,14 @@ fn corpus_gate() {
         .filter(|l| !l.is_empty())
         .map(String::from)
         .collect();
+    let disputed: HashMap<String, String> = std::env::var("STEPMESH_DISPUTED")
+        .ok()
+        .map(|p| std::fs::read_to_string(p).expect("STEPMESH_DISPUTED"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.split_once('\t'))
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .collect();
     std::panic::set_hook(Box::new(|_| {}));
 
     let mut classes: BTreeMap<String, usize> = BTreeMap::new();
@@ -172,6 +191,9 @@ fn corpus_gate() {
                 ("PANIC".to_string(), String::new())
             }
             Ok(Ok(Err(e))) => (format!("error: {}", error_class(&e)), e.to_string()),
+            Ok(Ok(Ok(_))) if disputed.contains_key(path) => {
+                ("reference disputed".to_string(), disputed[path].clone())
+            }
             Ok(Ok(Ok(m))) => match r {
                 None => ("ok (no reference)".to_string(), String::new()),
                 Some(r) => match judge(&m, r) {

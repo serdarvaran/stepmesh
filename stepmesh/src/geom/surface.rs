@@ -5,6 +5,8 @@ use super::nurbs::Nurbs2;
 use crate::model::{Frame, P3, add, cross, dot, mul, norm, sub, unit};
 
 const NEWTON_STEPS: usize = 60;
+/// Grid points the projection starts from when the hint does not lead to the point.
+const MAX_STARTS: usize = 4;
 const INF: f64 = f64::INFINITY;
 
 /// Face geometry in millimetres. Parametrisations follow ISO 10303-42.
@@ -257,7 +259,11 @@ impl Surface {
                 match from_hint {
                     Some(q) if near(q) <= 1e-12 * (1.0 + dot(p, p)) => q,
                     _ => {
-                        let from_grid = self.newton(p, self.start(p));
+                        let from_grid = self
+                            .starts(p)
+                            .into_iter()
+                            .filter_map(|s| self.newton(p, s))
+                            .min_by(|a, b| near(*a).total_cmp(&near(*b)));
                         match (from_hint, from_grid) {
                             (Some(a), Some(b)) => {
                                 if near(a) <= near(b) {
@@ -292,11 +298,13 @@ impl Surface {
         angle(f, p, 1.0, 1.0)
     }
 
-    /// Starting parameters for the iteration: the best point of a grid over the bounds.
-    fn start(&self, p: P3) -> (f64, f64) {
+    /// Starting parameters for the iteration: the nearest points of a grid over the bounds, at
+    /// most one per position (all the parameters of a pole map to one point, and starting there
+    /// leaves no direction to move in).
+    fn starts(&self, p: P3) -> Vec<(f64, f64)> {
         if let Surface::Extrusion { curve, dir } = self {
             let u = curve.project(p);
-            return (u, dot(sub(p, curve.point(u)), *dir));
+            return vec![(u, dot(sub(p, curve.point(u)), *dir))];
         }
         if let Surface::Revolution {
             curve,
@@ -311,7 +319,7 @@ impl Surface {
             let frame = Frame::new(*axis_origin, *axis_dir, sub(reference, *axis_origin))
                 .or_else(|| Frame::new(*axis_origin, *axis_dir, [1.0, 0.0, 0.0]));
             let Some(frame) = frame else {
-                return (0.0, 0.0);
+                return vec![(0.0, 0.0)];
             };
             let turn = angle(&frame, p, 1.0, 1.0);
             let v = curve.project(add(
@@ -319,27 +327,38 @@ impl Surface {
                 rotate(sub(p, *axis_origin), *axis_dir, -turn),
             ));
             let u = turn - angle(&frame, curve.point(v), 1.0, 1.0);
-            return (u.rem_euclid(TAU), v);
+            return vec![(u.rem_euclid(TAU), v)];
         }
         let [(u0, u1), (v0, v1)] = self.param_bounds();
         let n = match self {
             Surface::Nurbs(s) => (2 * s.ctrl.len().max(s.ctrl[0].len())).max(16),
             _ => 32,
         };
-        let mut best = (u0, v0, INF);
+        let mut grid = Vec::with_capacity((n + 1) * (n + 1));
         for i in 0..=n {
             for j in 0..=n {
                 let (u, v) = (
                     u0 + (u1 - u0) * i as f64 / n as f64,
                     v0 + (v1 - v0) * j as f64 / n as f64,
                 );
-                let d = dist2(self.point(u, v), p);
-                if d < best.2 {
-                    best = (u, v, d);
-                }
+                let q = self.point(u, v);
+                grid.push((dist2(q, p), q, (u, v)));
             }
         }
-        (best.0, best.1)
+        grid.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut out: Vec<(P3, (f64, f64))> = Vec::new();
+        for (_, q, uv) in grid {
+            if out.len() == MAX_STARTS {
+                break;
+            }
+            if out
+                .iter()
+                .all(|(o, _)| dist2(*o, q) > 1e-18 * (1.0 + dot(q, q)))
+            {
+                out.push((q, uv));
+            }
+        }
+        out.into_iter().map(|(_, uv)| uv).collect()
     }
 
     /// Gauss–Newton on the squared distance with step halving; non-periodic parameters stay in

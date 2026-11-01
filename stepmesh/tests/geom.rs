@@ -484,3 +484,47 @@ fn projection_of_a_point_just_off_a_boundary() {
         assert!(dist(s.point(found.0, found.1), p) < 1e-6);
     }
 }
+
+/// Patch whose u = 0 side collapses into one point (a pole), like a spherical cap made of a
+/// B-spline: a grid start at the pole must not trap the projection.
+fn pole_patch() -> Surface {
+    let ctrl = (0..4)
+        .map(|i| {
+            (0..5)
+                .map(|j| {
+                    let r = i as f64 * 3.0;
+                    let a = std::f64::consts::PI * j as f64 / 4.0;
+                    [r * a.cos(), r * a.sin(), 0.5 * r * r / 9.0, 1.0]
+                })
+                .collect()
+        })
+        .collect();
+    Surface::Nurbs(Nurbs2 {
+        du: 3,
+        dv: 2,
+        ku: expand_knots(&[4, 4], &[0.0, 1.0]),
+        kv: expand_knots(&[3, 1, 1, 3], &[0.0, 0.3, 0.7, 1.0]),
+        ctrl,
+        closed_u: false,
+        closed_v: false,
+    })
+}
+
+#[test]
+fn projection_near_a_collapsed_side() {
+    let s = pole_patch();
+    for i in 1..30 {
+        for &v in &[0.0, 0.5, 1.0] {
+            let u = 0.02 * i as f64 / 29.0;
+            let p = s.point(u, v);
+            let (pu, pv) = s
+                .project(p, None)
+                .unwrap_or_else(|| panic!("no projection at ({u}, {v})"));
+            assert!(
+                dist(s.point(pu, pv), p) < 1e-7,
+                "({u}, {v}) -> ({pu}, {pv}): {}",
+                dist(s.point(pu, pv), p)
+            );
+        }
+    }
+}
