@@ -1,0 +1,12 @@
+[package]
+name = "stepmesh"
+version = "0.1.0"
+description = "Pure Rust STEP (ISO 10303-21) reader that turns B-rep solids into watertight triangle meshes"
+keywords = ["step", "cad", "mesh", "brep", "tessellation"]
+categories = ["parser-implementations", "graphics", "science"]
+readme = "../README.md"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
