@@ -1,4 +1,16 @@
 //! Reads STEP (ISO 10303-21) files and turns their B-rep solids into watertight triangle meshes.
+//!
+//! ```no_run
+//! let bytes = std::fs::read("part.step")?;
+//! let mesh = stepmesh::read_step(&bytes, &stepmesh::Options::default())?;
+//! let volume: f64 = mesh.solids.iter().map(|s| s.volume()).sum();
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
+//! Every returned solid is closed and consistently oriented, in millimetres, with assembly
+//! placements applied. Input that cannot be meshed faithfully (an unsupported entity, an open
+//! shell, a face that does not lay out in its parameter space) fails with an [`Error`]; no
+//! approximate or partial result is returned.
 #![forbid(unsafe_code)]
 
 mod error;
