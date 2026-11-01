@@ -521,6 +521,71 @@ mod seamless {
     }
 
     #[test]
+    fn cylinder_band_under_a_notched_loop() {
+        // The top loop runs at z = 4 but dips to z = 1 over u = 0..1: a seam straight down from
+        // its corner at u = 0 would run along its own edge.
+        let (r, top, notch, w) = (5.0, 4.0, 1.0, 1.0);
+        let at = |u: f64, z: f64| [r * u.cos(), r * u.sin(), z];
+        let circle = |z: f64| Curve::Circle {
+            frame: Frame::new([0.0, 0.0, z], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]).unwrap(),
+            r,
+        };
+        let line = |from: [f64; 3], dz: f64| Curve::Line {
+            origin: from,
+            dir: [0.0, 0.0, dz.signum()],
+        };
+        let edge = |curve, start, end, sv, ev| Edge {
+            curve,
+            start,
+            end,
+            start_vertex: sv,
+            end_vertex: ev,
+            same_sense: true,
+        };
+        let edges = [
+            (1, edge(circle(0.0), at(0.0, 0.0), at(0.0, 0.0), 1, 1)),
+            // Counter-clockwise seen from +z: down the notch, along it, up, round the top.
+            (
+                2,
+                edge(
+                    line(at(0.0, top), -1.0),
+                    at(0.0, top),
+                    at(0.0, notch),
+                    10,
+                    11,
+                ),
+            ),
+            (3, edge(circle(notch), at(0.0, notch), at(w, notch), 11, 12)),
+            (
+                4,
+                edge(line(at(w, notch), 1.0), at(w, notch), at(w, top), 12, 13),
+            ),
+            (5, edge(circle(top), at(w, top), at(0.0, top), 13, 10)),
+        ];
+        let polys: HashMap<u64, Vec<[f64; 3]>> = edges
+            .iter()
+            .map(|(id, e)| (*id, discretize_edge(e, &Options::default()).unwrap()))
+            .collect();
+        let face = Face {
+            id: 1,
+            surface: Surface::Cylinder { frame: frame(), r },
+            same_sense: true,
+            outer: None,
+            loops: vec![
+                (
+                    Loop::Edges(vec![(2, true), (3, true), (4, true), (5, true)]),
+                    false,
+                ),
+                (Loop::Edges(vec![(1, true)]), true),
+            ],
+        };
+        let fm = tessellate_face(&face, &polys, &Options::default()).unwrap();
+        let want = r * (TAU * top - w * (top - notch));
+        let got = area(&fm, &polys);
+        assert!((got - want).abs() < 1e-3 * want, "{got} vs {want}");
+    }
+
+    #[test]
     fn cylinder_band_with_a_hole_where_its_loops_start() {
         // Both circles start at u = 0, and a window in the wall spans u = -0.3 to 0.3: the band
         // must not be joined through the window.
@@ -649,20 +714,26 @@ mod seamless {
         };
         let polys = HashMap::from([(1u64, discretize_edge(&e, &Options::default()).unwrap())]);
         let cap = TAU * r * r * (1.0 - half.cos());
-        // Counter-clockwise seen from outside (+x): the cap lies on its left.
-        for (ccw, want) in [(true, cap), (false, 4.0 * PI * r * r - cap)] {
+        // Counter-clockwise seen from outside (+x): the cap lies on its left. A loop given as
+        // the outer bound encloses the face whichever way it runs (exporters disagree on the
+        // normals of closed surfaces); only a plain bound running clockwise leaves the cap out.
+        for (ccw, outer, want) in [
+            (true, Some(0), cap),
+            (false, None, 4.0 * PI * r * r - cap),
+            (false, Some(0), cap),
+        ] {
             let face = Face {
                 id: 1,
                 surface: Surface::Sphere { frame: frame(), r },
                 same_sense: true,
-                outer: Some(0),
+                outer,
                 loops: vec![(Loop::Edges(vec![(1, true)]), ccw)],
             };
             let fm = tessellate_face(&face, &polys, &Options::default()).unwrap();
             let got = area(&fm, &polys);
             assert!(
                 (got - want).abs() < 1e-3 * want,
-                "ccw {ccw}: {got} vs {want}"
+                "ccw {ccw} outer {outer:?}: {got} vs {want}"
             );
         }
     }

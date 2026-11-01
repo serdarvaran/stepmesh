@@ -87,10 +87,12 @@ pub fn tessellate_face(
     } else {
         loops = c.close_wraps(loops)?;
         // A face can lie outside all its loops on a closed surface (a sphere with holes): the
-        // whole parameter domain is then its outer boundary.
+        // whole parameter domain is then its outer boundary. Not when a loop is given as the
+        // outer bound: some exporters write such faces against their surface's normal, and the
+        // face is the region inside it.
         let side = if f.same_sense { 1.0 } else { -1.0 };
         let (pu, pv) = c.s.period();
-        if let Some(pu) = pu {
+        if let (Some(pu), None) = (pu, f.outer) {
             if loops.iter().all(|l| side * signed_area(l) < 0.0) {
                 // Its seams go where no loop reaches, so that the loops lie inside it.
                 let start = (
@@ -294,29 +296,21 @@ impl Ctx<'_> {
                 _ => return Err(self.fail("a loop goes round the surface along v")),
             }
         }
-        // The seam starts at the first point of the (first) wrapping loop: there no hole may lie.
-        let start = |l: Vec<BPoint>, du: f64, plain: &[Vec<BPoint>]| {
-            if plain.is_empty() {
-                l
-            } else {
-                restart_near(l, du, free_param(plain, 0, du.abs()))
-            }
-        };
         match wrapping.len() {
             0 => {}
             1 => {
                 let (l, du) = wrapping.pop().ok_or_else(|| self.fail("no loop"))?;
-                let l = start(l, du, &plain);
-                plain.push(self.close_at_pole(l, du)?);
+                let closed = self.close_at_pole(l, du, &plain)?;
+                plain.push(closed);
             }
             2 => {
                 let (b, db) = wrapping.pop().ok_or_else(|| self.fail("no loop"))?;
                 let (a, da) = wrapping.pop().ok_or_else(|| self.fail("no loop"))?;
-                let a = start(a, da, &plain);
                 if da.signum() == db.signum() {
                     return Err(self.fail("two loops go round the surface the same way"));
                 }
-                plain.push(self.join_band(a, da, b, db));
+                let band = self.join_band(a, da, b, db, &plain);
+                plain.push(band);
             }
             _ => return Err(self.fail("more than two loops go round the surface")),
         }
@@ -326,10 +320,16 @@ impl Ctx<'_> {
     /// The loop, then its first point a period on, then the pole back to the start. The face
     /// lies left of the loop in parameter space (right when it runs against its surface), which
     /// picks the pole.
-    fn close_at_pole(&mut self, mut l: Vec<BPoint>, du: f64) -> Result<Vec<BPoint>, Error> {
+    fn close_at_pole(
+        &mut self,
+        l: Vec<BPoint>,
+        du: f64,
+        holes: &[Vec<BPoint>],
+    ) -> Result<Vec<BPoint>, Error> {
         let [_, (v0, v1)] = self.s.param_bounds();
         let north = (du > 0.0) == self.f.same_sense;
         let v = if north { v1 } else { v0 };
+        let mut l = restart_at(&l, du, seam_start(&l, v, holes, du.abs()));
         let first = l[0];
         if !v.is_finite() || !self.singular((first.uv.0, v)).0 {
             return Err(self.fail("a loop goes round the surface and no pole closes it"));
@@ -368,7 +368,14 @@ impl Ctx<'_> {
     /// share their points. On a surface closed along v too (torus) the loops bound two bands:
     /// the face lies left of `a` in parameter space (right when it runs against its surface),
     /// which places `b` above or below it.
-    fn join_band(&mut self, a: Vec<BPoint>, da: f64, mut b: Vec<BPoint>, db: f64) -> Vec<BPoint> {
+    fn join_band(
+        &mut self,
+        a: Vec<BPoint>,
+        da: f64,
+        mut b: Vec<BPoint>,
+        db: f64,
+        holes: &[Vec<BPoint>],
+    ) -> Vec<BPoint> {
         if let Some(pv) = self.s.period().1 {
             let mean_v = |l: &[BPoint]| l.iter().map(|p| p.uv.1).sum::<f64>() / l.len() as f64;
             let gap = (mean_v(&a) - mean_v(&b)) / pv;
@@ -382,6 +389,9 @@ impl Ctx<'_> {
             }
         }
         let period = da.abs();
+        let mean_v = b.iter().map(|p| p.uv.1).sum::<f64>() / b.len() as f64;
+        let others: Vec<Vec<BPoint>> = holes.iter().cloned().chain([b.clone()]).collect();
+        let a = restart_at(&a, da, seam_start(&a, mean_v, &others, period));
         let target = a[0].uv.0 + da;
         let gap = |x: f64| {
             (x - target)
@@ -808,26 +818,71 @@ struct Checked {
     normals: Vec<Option<P3>>,
 }
 
-/// A loop going round by `du` along u, restarted at its regular point nearest `u` (modulo the
-/// period): the points before it follow the end, a period on.
-fn restart_near(l: Vec<BPoint>, du: f64, u: f64) -> Vec<BPoint> {
-    let p = du.abs();
-    let dist = |x: f64| {
-        let d = (x - u).rem_euclid(p);
-        d.min(p - d)
-    };
-    let Some(i) = (0..l.len())
-        .filter(|&i| !l[i].pole)
-        .min_by(|&a, &b| dist(l[a].uv.0).total_cmp(&dist(l[b].uv.0)))
-    else {
-        return l;
-    };
+/// A loop going round by `du` along u, restarted at point `i`: the points before it follow the
+/// end, a period on.
+fn restart_at(l: &[BPoint], du: f64, i: usize) -> Vec<BPoint> {
     let mut out = l[i..].to_vec();
     out.extend(l[..i].iter().map(|b| BPoint {
         uv: (b.uv.0 + du, b.uv.1),
         ..*b
     }));
     out
+}
+
+/// Candidates tried for the start of a seam before falling back to the loop's first point.
+const SEAM_CANDIDATES: usize = 256;
+
+/// The point of loop `l` (going round a surface of period `p` along u) where a seam straight
+/// along v to the row `v` (the pole, or the other loop of a band) starts: the nearest to that
+/// row whose seam crosses neither `l` nor `others`.
+fn seam_start(l: &[BPoint], v: f64, others: &[Vec<BPoint>], p: f64) -> usize {
+    let mut order: Vec<usize> = (0..l.len()).filter(|&i| !l[i].pole).collect();
+    order.sort_by(|&a, &b| (l[a].uv.1 - v).abs().total_cmp(&(l[b].uv.1 - v).abs()));
+    // A loop going round closes on its first point a period on.
+    let segments = |c: &[BPoint]| {
+        let n = c.len();
+        let turn = ((c[n - 1].uv.0 - c[0].uv.0) / p).round() * p;
+        (0..n)
+            .map(move |i| {
+                let next = c[(i + 1) % n].uv;
+                let shift = if i + 1 == n { turn } else { 0.0 };
+                (c[i].uv, (next.0 + shift, next.1))
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut all = segments(l);
+    for o in others {
+        all.extend(segments(o));
+    }
+    order
+        .into_iter()
+        .take(SEAM_CANDIDATES)
+        .find(|&i| {
+            let (u, from) = l[i].uv;
+            !all.iter().any(|&(a, b)| crosses_seam(u, from, v, a, b, p))
+        })
+        .unwrap_or(0)
+}
+
+/// Whether segment `a`-`b` (or a copy a whole period `p` along u) meets the seam at `u` from
+/// `from` to `to` strictly between its ends.
+fn crosses_seam(u: f64, from: f64, to: f64, a: (f64, f64), b: (f64, f64), p: f64) -> bool {
+    let (lo, hi) = (from.min(to), from.max(to));
+    let eps = 1e-9 * (1.0 + hi.abs().max(lo.abs()));
+    let inside = |y: f64| y > lo + eps && y < hi - eps;
+    let (umin, umax) = (a.0.min(b.0), a.0.max(b.0));
+    let k0 = ((u - umax) / p).ceil() as i64;
+    let k1 = ((u - umin) / p).floor() as i64;
+    (k0..=k1).any(|k| {
+        let (a0, b0) = (a.0 + k as f64 * p, b.0 + k as f64 * p);
+        if (b0 - a0).abs() <= eps {
+            // Along the seam: overlapping it beyond its ends counts.
+            (a0 - u).abs() <= eps && a.1.max(b.1) > lo + eps && a.1.min(b.1) < hi - eps
+        } else {
+            let t = (u - a0) / (b0 - a0);
+            (0.0..=1.0).contains(&t) && inside(a.1 + t * (b.1 - a.1))
+        }
+    })
 }
 
 /// A parameter along `axis` (0: u, 1: v), of period `p`, that no loop reaches: the middle of
