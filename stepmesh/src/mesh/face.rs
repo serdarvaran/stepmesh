@@ -341,8 +341,22 @@ impl Ctx<'_> {
     /// Two loops going round a periodic surface in opposite directions, joined at their nearest
     /// points into one polygon: all of `a`, its first point a period on, a seam to `b`, `b` from
     /// there round to the same point a period back, and the seam back. Both copies of the seam
-    /// share their points.
-    fn join_band(&mut self, a: Vec<BPoint>, da: f64, b: Vec<BPoint>, db: f64) -> Vec<BPoint> {
+    /// share their points. On a surface closed along v too (torus) the loops bound two bands:
+    /// the face lies left of `a` in parameter space (right when it runs against its surface),
+    /// which places `b` above or below it.
+    fn join_band(&mut self, a: Vec<BPoint>, da: f64, mut b: Vec<BPoint>, db: f64) -> Vec<BPoint> {
+        if let Some(pv) = self.s.period().1 {
+            let mean_v = |l: &[BPoint]| l.iter().map(|p| p.uv.1).sum::<f64>() / l.len() as f64;
+            let gap = (mean_v(&a) - mean_v(&b)) / pv;
+            let k = if (da > 0.0) == self.f.same_sense {
+                gap.floor() + 1.0
+            } else {
+                gap.ceil() - 1.0
+            };
+            for p in &mut b {
+                p.uv.1 += k * pv;
+            }
+        }
         let period = da.abs();
         let target = a[0].uv.0 + da;
         let gap = |x: f64| {

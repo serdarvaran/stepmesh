@@ -562,6 +562,57 @@ mod seamless {
     }
 
     #[test]
+    fn torus_band_lies_on_the_side_its_loops_give() {
+        // Between the outer equator (v = 0) and the top circle (v = π/2) a torus has two bands:
+        // the quarter and the other three quarters. The loops' direction picks one.
+        let (major, minor) = (40.0, 10.0);
+        let mut polys = HashMap::new();
+        let mut circles = Vec::new();
+        for (z, rho, id) in [(0.0, major + minor, 1u64), (minor, major, 2)] {
+            let start = [rho, 0.0, z];
+            let e = Edge {
+                curve: Curve::Circle {
+                    frame: Frame::new([0.0, 0.0, z], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]).unwrap(),
+                    r: rho,
+                },
+                start,
+                end: start,
+                start_vertex: id,
+                end_vertex: id,
+                same_sense: true,
+            };
+            polys.insert(id, discretize_edge(&e, &Options::default()).unwrap());
+            circles.push(id);
+        }
+        let quarter = TAU * minor * (major * FRAC_PI_2 + minor);
+        let whole = TAU * TAU * major * minor;
+        // Counter-clockwise (seen from +z) along the equator, clockwise along the top circle:
+        // the face lies on the +v side of the first, between the two.
+        for (equator_ccw, want) in [(true, quarter), (false, whole - quarter)] {
+            let face = Face {
+                id: 1,
+                surface: Surface::Torus {
+                    frame: frame(),
+                    major,
+                    minor,
+                },
+                same_sense: true,
+                outer: Some(1),
+                loops: vec![
+                    (Loop::Edges(vec![(circles[0], true)]), equator_ccw),
+                    (Loop::Edges(vec![(circles[1], true)]), !equator_ccw),
+                ],
+            };
+            let fm = tessellate_face(&face, &polys, &Options::default()).unwrap();
+            let got = area(&fm, &polys);
+            assert!(
+                (got - want).abs() < 1e-3 * want,
+                "equator ccw {equator_ccw}: {got} vs {want}"
+            );
+        }
+    }
+
+    #[test]
     fn band_seam_follows_a_wavy_tube() {
         // A circle swept along a wavy axis of four quadratic humps (tangent-continuous at their
         // joints): the seam (u = 0) sampled only at 1/4, 1/2 and 3/4 of its length lies on its
