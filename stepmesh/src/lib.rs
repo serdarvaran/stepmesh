@@ -6,8 +6,10 @@ mod geom;
 mod mesh;
 mod model;
 pub mod p21;
+mod read;
 
 pub use error::Error;
+pub use read::{SolidMesh, StepMesh, read_step};
 
 /// Tessellation tolerances.
 #[derive(Debug, Clone, PartialEq)]

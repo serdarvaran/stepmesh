@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use spade::handles::FixedVertexHandle;
-use spade::{ConstrainedDelaunayTriangulation, Point2, Triangulation};
+use spade::{ConstrainedDelaunayTriangulation, Point2, PositionInTriangulation, Triangulation};
 
 use super::edges::sample_curve;
 use crate::geom::Surface;
@@ -367,6 +367,16 @@ impl Ctx<'_> {
                 break;
             }
             for uv in candidates {
+                // A point on a boundary edge would split it in this face only: a T-junction.
+                match cdt.locate(Point2::new(uv.0 * su, uv.1 * sv)) {
+                    PositionInTriangulation::OnVertex(_) => continue,
+                    PositionInTriangulation::OnEdge(e)
+                        if cdt.is_constraint_edge(e.as_undirected()) =>
+                    {
+                        continue;
+                    }
+                    _ => {}
+                }
                 let p = self.s.point(uv.0, uv.1);
                 let r = self.new_inner(p);
                 insert(
