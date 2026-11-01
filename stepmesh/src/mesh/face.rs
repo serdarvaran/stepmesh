@@ -632,7 +632,7 @@ impl Ctx<'_> {
                       b: BPoint|
          -> Result<FixedVertexHandle, Error> {
             let h = cdt
-                .insert(Point2::new(b.uv.0 * su, b.uv.1 * sv))
+                .insert(cdt_point(b.uv, su, sv))
                 .map_err(|_| Ctx::error(face, "a parameter point cannot be triangulated"))?;
             if h.index() == info.len() {
                 info.push(b);
@@ -672,7 +672,7 @@ impl Ctx<'_> {
             }
             for uv in candidates {
                 // A point on a boundary edge would split it in this face only: a T-junction.
-                match cdt.locate(Point2::new(uv.0 * su, uv.1 * sv)) {
+                match cdt.locate(cdt_point(uv, su, sv)) {
                     PositionInTriangulation::OnVertex(_) => continue,
                     PositionInTriangulation::OnEdge(e)
                         if cdt.is_constraint_edge(e.as_undirected()) =>
@@ -816,6 +816,13 @@ struct Checked {
     triangles: FxSet<[u32; 3]>,
     edges: FxSet<[u32; 2]>,
     normals: Vec<Option<P3>>,
+}
+
+/// Scaled parameters as a triangulation point. The triangulation rejects magnitudes below
+/// 2^-142 other than zero; exporters write such values (1e-45) for zero.
+fn cdt_point(uv: (f64, f64), su: f64, sv: f64) -> Point2<f64> {
+    let snap = |x: f64| if x.abs() < 1e-30 { 0.0 } else { x };
+    Point2::new(snap(uv.0 * su), snap(uv.1 * sv))
 }
 
 /// A loop going round by `du` along u, restarted at point `i`: the points before it follow the

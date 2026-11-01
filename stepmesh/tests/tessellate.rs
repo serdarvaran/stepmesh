@@ -521,6 +521,49 @@ mod seamless {
     }
 
     #[test]
+    fn plane_with_a_parameter_a_hair_from_zero() {
+        // Exporters write coordinates such as 1e-45 for zero; the triangulation takes no
+        // magnitude that small but zero.
+        let corners = [
+            [0.0, 1e-45, 0.0],
+            [8.0, 1e-45, 0.0],
+            [8.0, 4.0, 0.0],
+            [0.0, 4.0, 0.0],
+        ];
+        let mut polys = HashMap::new();
+        let mut list = Vec::new();
+        for i in 0..4 {
+            let (a, b) = (corners[i], corners[(i + 1) % 4]);
+            let len = dist(a, b);
+            let e = Edge {
+                curve: Curve::Line {
+                    origin: a,
+                    dir: [(b[0] - a[0]) / len, (b[1] - a[1]) / len, 0.0],
+                },
+                start: a,
+                end: b,
+                start_vertex: i as u64,
+                end_vertex: ((i + 1) % 4) as u64,
+                same_sense: true,
+            };
+            polys.insert(
+                i as u64 + 1,
+                discretize_edge(&e, &Options::default()).unwrap(),
+            );
+            list.push((i as u64 + 1, true));
+        }
+        let face = Face {
+            id: 1,
+            surface: Surface::Plane(frame()),
+            same_sense: true,
+            outer: Some(0),
+            loops: vec![(Loop::Edges(list), true)],
+        };
+        let fm = tessellate_face(&face, &polys, &Options::default()).unwrap();
+        assert!((area(&fm, &polys) - 32.0).abs() < 1e-9);
+    }
+
+    #[test]
     fn cylinder_band_under_a_notched_loop() {
         // The top loop runs at z = 4 but dips to z = 1 over u = 0..1: a seam straight down from
         // its corner at u = 0 would run along its own edge.
