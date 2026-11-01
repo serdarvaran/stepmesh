@@ -3,15 +3,38 @@
 
 mod error;
 mod geom;
+mod mesh;
 mod model;
 pub mod p21;
 
 pub use error::Error;
 
+/// Tessellation tolerances.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Options {
+    /// Largest distance between the mesh and the exact surface, in millimetres.
+    pub linear_deflection: f64,
+    /// Largest angle between neighbouring mesh edges along a curve, in radians.
+    pub angular_deflection: f64,
+    /// Fail with [`Error::TriangleLimit`] above this many triangles.
+    pub max_triangles: Option<usize>,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Options {
+            linear_deflection: 0.003,
+            angular_deflection: 0.5,
+            max_triangles: None,
+        }
+    }
+}
+
 /// Intermediate stages, exposed for the crate's own tests; not a stable interface.
 #[doc(hidden)]
 pub mod internals {
     pub use crate::geom::{Curve, Nurbs1, Nurbs2, Surface, expand_knots};
+    pub use crate::mesh::discretize_edge;
     pub use crate::model::{
         Brep, Edge, Face, Frame, Instance, Loop, Model, P3, Part, Shell, Transform, Units,
         decode_brep, decode_curve, decode_model, decode_surface,
