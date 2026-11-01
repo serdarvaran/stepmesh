@@ -294,15 +294,25 @@ impl Ctx<'_> {
                 _ => return Err(self.fail("a loop goes round the surface along v")),
             }
         }
+        // The seam starts at the first point of the (first) wrapping loop: there no hole may lie.
+        let start = |l: Vec<BPoint>, du: f64, plain: &[Vec<BPoint>]| {
+            if plain.is_empty() {
+                l
+            } else {
+                restart_near(l, du, free_param(plain, 0, du.abs()))
+            }
+        };
         match wrapping.len() {
             0 => {}
             1 => {
                 let (l, du) = wrapping.pop().ok_or_else(|| self.fail("no loop"))?;
+                let l = start(l, du, &plain);
                 plain.push(self.close_at_pole(l, du)?);
             }
             2 => {
                 let (b, db) = wrapping.pop().ok_or_else(|| self.fail("no loop"))?;
                 let (a, da) = wrapping.pop().ok_or_else(|| self.fail("no loop"))?;
+                let a = start(a, da, &plain);
                 if da.signum() == db.signum() {
                     return Err(self.fail("two loops go round the surface the same way"));
                 }
@@ -796,6 +806,28 @@ struct Checked {
     triangles: FxSet<[u32; 3]>,
     edges: FxSet<[u32; 2]>,
     normals: Vec<Option<P3>>,
+}
+
+/// A loop going round by `du` along u, restarted at its regular point nearest `u` (modulo the
+/// period): the points before it follow the end, a period on.
+fn restart_near(l: Vec<BPoint>, du: f64, u: f64) -> Vec<BPoint> {
+    let p = du.abs();
+    let dist = |x: f64| {
+        let d = (x - u).rem_euclid(p);
+        d.min(p - d)
+    };
+    let Some(i) = (0..l.len())
+        .filter(|&i| !l[i].pole)
+        .min_by(|&a, &b| dist(l[a].uv.0).total_cmp(&dist(l[b].uv.0)))
+    else {
+        return l;
+    };
+    let mut out = l[i..].to_vec();
+    out.extend(l[..i].iter().map(|b| BPoint {
+        uv: (b.uv.0 + du, b.uv.1),
+        ..*b
+    }));
+    out
 }
 
 /// A parameter along `axis` (0: u, 1: v), of period `p`, that no loop reaches: the middle of

@@ -521,6 +521,72 @@ mod seamless {
     }
 
     #[test]
+    fn cylinder_band_with_a_hole_where_its_loops_start() {
+        // Both circles start at u = 0, and a window in the wall spans u = -0.3 to 0.3: the band
+        // must not be joined through the window.
+        let (r, h, w) = (5.0, 10.0, 0.3);
+        let at = |u: f64, z: f64| [r * u.cos(), r * u.sin(), z];
+        let circle = |z: f64, ccw: bool| Curve::Circle {
+            frame: Frame::new(
+                [0.0, 0.0, z],
+                [0.0, 0.0, if ccw { 1.0 } else { -1.0 }],
+                [1.0, 0.0, 0.0],
+            )
+            .unwrap(),
+            r,
+        };
+        let line = |from: [f64; 3], dz: f64| Curve::Line {
+            origin: from,
+            dir: [0.0, 0.0, dz.signum()],
+        };
+        let edge = |curve, start, end, sv, ev| Edge {
+            curve,
+            start,
+            end,
+            start_vertex: sv,
+            end_vertex: ev,
+            same_sense: true,
+        };
+        let edges = [
+            (1, edge(circle(0.0, true), at(0.0, 0.0), at(0.0, 0.0), 1, 1)),
+            (2, edge(circle(h, false), at(0.0, h), at(0.0, h), 2, 2)),
+            // The window, clockwise seen from outside: up, along the top, down, back.
+            (
+                3,
+                edge(line(at(-w, 3.0), 1.0), at(-w, 3.0), at(-w, 7.0), 10, 11),
+            ),
+            (4, edge(circle(7.0, true), at(-w, 7.0), at(w, 7.0), 11, 12)),
+            (
+                5,
+                edge(line(at(w, 7.0), -1.0), at(w, 7.0), at(w, 3.0), 12, 13),
+            ),
+            (6, edge(circle(3.0, false), at(w, 3.0), at(-w, 3.0), 13, 10)),
+        ];
+        let polys: HashMap<u64, Vec<[f64; 3]>> = edges
+            .iter()
+            .map(|(id, e)| (*id, discretize_edge(e, &Options::default()).unwrap()))
+            .collect();
+        let face = Face {
+            id: 1,
+            surface: Surface::Cylinder { frame: frame(), r },
+            same_sense: true,
+            outer: None,
+            loops: vec![
+                (Loop::Edges(vec![(1, true)]), true),
+                (Loop::Edges(vec![(2, true)]), true),
+                (
+                    Loop::Edges(vec![(3, true), (4, true), (5, true), (6, true)]),
+                    true,
+                ),
+            ],
+        };
+        let fm = tessellate_face(&face, &polys, &Options::default()).unwrap();
+        let want = TAU * r * h - 2.0 * w * r * 4.0;
+        let got = area(&fm, &polys);
+        assert!((got - want).abs() < 1e-3 * want, "{got} vs {want}");
+    }
+
+    #[test]
     fn cylinder_band_without_a_seam() {
         let (r, h) = (5.0, 8.0);
         let cyl = Surface::Cylinder { frame: frame(), r };
