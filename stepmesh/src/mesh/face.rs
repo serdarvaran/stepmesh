@@ -6,6 +6,7 @@ use spade::handles::FixedVertexHandle;
 use spade::{ConstrainedDelaunayTriangulation, Point2, PositionInTriangulation, Triangulation};
 
 use super::edges::sample_curve;
+use super::param::Param;
 use crate::fxhash::FxSet;
 use crate::geom::Surface;
 use crate::model::{Face, Loop, P3, add, dot, mul, norm, sub};
@@ -49,7 +50,9 @@ struct BPoint {
 
 struct Ctx<'a> {
     f: &'a Face,
-    s: &'a Surface,
+    s: Param<'a>,
+    /// Whether the face's normal is that of `s` (the file's same_sense, reversed when swapped).
+    same_sense: bool,
     o: &'a Options,
     inner: Vec<P3>,
 }
@@ -59,28 +62,23 @@ pub fn tessellate_face(
     edges: &HashMap<u64, Vec<P3>>,
     o: &Options,
 ) -> Result<FaceMesh, Error> {
-    let mut c = Ctx {
+    let ctx = |swapped: bool| Ctx {
         f,
-        s: &f.surface,
+        s: Param {
+            surface: &f.surface,
+            swapped,
+        },
+        same_sense: f.same_sense != swapped,
         o,
         inner: Vec::new(),
     };
-    let mut loops = Vec::new();
-    let edge_loops = f
-        .loops
-        .iter()
-        .filter(|(l, _)| matches!(l, Loop::Edges(_)))
-        .count();
-    for (index, (l, orientation)) in f.loops.iter().enumerate() {
-        if let Loop::Edges(list) = l {
-            let pts = loop_points(list, *orientation, edges)
-                .ok_or_else(|| Ctx::error(f.id, "a loop edge has no polyline"))?;
-            let outer = match f.outer {
-                Some(o) => Some(o == index),
-                None => (edge_loops == 1).then_some(true),
-            };
-            loops.push(c.map_loop(&pts, outer)?);
-        }
+    let mut c = ctx(false);
+    let mut loops = c.map_loops(edges)?;
+    // Loops going round along v only are closed with u and v swapped.
+    let along = |c: &Ctx, l: &[BPoint]| c.advance(l);
+    if loops.iter().any(|l| along(&c, l).1 != 0.0) && loops.iter().all(|l| along(&c, l).0 == 0.0) {
+        c = ctx(true);
+        loops = c.map_loops(edges)?;
     }
     if loops.is_empty() {
         loops = c.full_domain((0.0, 0.0))?;
@@ -90,7 +88,7 @@ pub fn tessellate_face(
         // whole parameter domain is then its outer boundary. Not when a loop is given as the
         // outer bound: some exporters write such faces against their surface's normal, and the
         // face is the region inside it.
-        let side = if f.same_sense { 1.0 } else { -1.0 };
+        let side = if c.same_sense { 1.0 } else { -1.0 };
         let (pu, pv) = c.s.period();
         if let (Some(pu), None) = (pu, f.outer) {
             if loops.iter().all(|l| side * signed_area(l) < 0.0) {
@@ -144,6 +142,29 @@ impl Ctx<'_> {
         Ctx::error(self.f.id, reason)
     }
 
+    /// Parameters of every edge loop of the face (vertex loops add nothing).
+    fn map_loops(&self, edges: &HashMap<u64, Vec<P3>>) -> Result<Vec<Vec<BPoint>>, Error> {
+        let f = self.f;
+        let edge_loops = f
+            .loops
+            .iter()
+            .filter(|(l, _)| matches!(l, Loop::Edges(_)))
+            .count();
+        let mut loops = Vec::new();
+        for (index, (l, orientation)) in f.loops.iter().enumerate() {
+            if let Loop::Edges(list) = l {
+                let pts = loop_points(list, *orientation, edges)
+                    .ok_or_else(|| self.fail("a loop edge has no polyline"))?;
+                let outer = match f.outer {
+                    Some(o) => Some(o == index),
+                    None => (edge_loops == 1).then_some(true),
+                };
+                loops.push(self.map_loop(&pts, outer)?);
+            }
+        }
+        Ok(loops)
+    }
+
     /// Whether the surface collapses along u (or v) at this parameter point.
     /// A direction counts as collapsed when its derivative is tiny next to the other one: a
     /// boundary point a hair off a pole (file tolerance) is still the pole.
@@ -195,7 +216,7 @@ impl Ctx<'_> {
         if blocks == 0 || blocks > 4 {
             return Ok(plain);
         }
-        let want = outer.map(|o| if o == self.f.same_sense { 1.0 } else { -1.0 });
+        let want = outer.map(|o| if o == self.same_sense { 1.0 } else { -1.0 });
         let fits = |l: &[BPoint]| {
             self.advance(l) == (0.0, 0.0) && want.is_none_or(|w| w * signed_area(l) > 0.0)
         };
@@ -327,7 +348,7 @@ impl Ctx<'_> {
         holes: &[Vec<BPoint>],
     ) -> Result<Vec<BPoint>, Error> {
         let [_, (v0, v1)] = self.s.param_bounds();
-        let north = (du > 0.0) == self.f.same_sense;
+        let north = (du > 0.0) == self.same_sense;
         let v = if north { v1 } else { v0 };
         let mut l = restart_at(&l, du, seam_start(&l, v, holes, du.abs()));
         let first = l[0];
@@ -379,7 +400,7 @@ impl Ctx<'_> {
         if let Some(pv) = self.s.period().1 {
             let mean_v = |l: &[BPoint]| l.iter().map(|p| p.uv.1).sum::<f64>() / l.len() as f64;
             let gap = (mean_v(&a) - mean_v(&b)) / pv;
-            let k = if (da > 0.0) == self.f.same_sense {
+            let k = if (da > 0.0) == self.same_sense {
                 gap.floor() + 1.0
             } else {
                 gap.ceil() - 1.0
@@ -548,7 +569,7 @@ impl Ctx<'_> {
             None if vb0.is_finite() && vb1.is_finite() => (vb0, vb1),
             None => return Err(self.fail("the surface has no finite parameter range")),
         };
-        let s = self.s.clone();
+        let s = self.s;
         // Side samples (parameters) along u at v = v0 and along v at u = u0.
         let bottom_collapsed = self.singular((u0, v0)).0;
         let top_collapsed = self.singular((u0, v1)).0;
@@ -656,7 +677,7 @@ impl Ctx<'_> {
                 }
             }
         }
-        let planar = matches!(self.s, Surface::Plane(_));
+        let planar = matches!(self.s.surface, Surface::Plane(_));
         let mut checked = Checked::default();
         for _ in 0..if planar { 0 } else { MAX_REFINE_ROUNDS } {
             let inside = classify(&cdt);
@@ -696,7 +717,7 @@ impl Ctx<'_> {
             }
         }
         let inside = classify(&cdt);
-        let flip = !self.f.same_sense;
+        let flip = !self.same_sense;
         let mut tris = Vec::new();
         for face in cdt.inner_faces() {
             if !inside[face.fix().index()] {

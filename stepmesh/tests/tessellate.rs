@@ -521,6 +521,58 @@ mod seamless {
     }
 
     #[test]
+    fn torus_elbow_between_two_meridians() {
+        // A pipe bend: the torus between its meridian circles at u = 0 and u = π/2. Both loops
+        // go round along v; their direction picks the quarter or the other three quarters.
+        let (major, minor) = (40.0, 10.0);
+        let quarter = PI * PI * major * minor;
+        for (first_way, want) in [(true, quarter), (false, 3.0 * quarter)] {
+            let mut polys = HashMap::new();
+            let mut loops = Vec::new();
+            for (id, centre, axis) in [
+                (1u64, [major, 0.0, 0.0], [0.0, 1.0, 0.0]),
+                (2, [0.0, major, 0.0], [1.0, 0.0, 0.0]),
+            ] {
+                let sign = if first_way { 1.0 } else { -1.0 };
+                let frame = Frame::new(
+                    centre,
+                    axis.map(|a| a * sign),
+                    [centre[0] / major, centre[1] / major, 0.0],
+                )
+                .unwrap();
+                let start = frame.to_world([minor, 0.0, 0.0]);
+                let e = Edge {
+                    curve: Curve::Circle { frame, r: minor },
+                    start,
+                    end: start,
+                    start_vertex: id,
+                    end_vertex: id,
+                    same_sense: true,
+                };
+                polys.insert(id, discretize_edge(&e, &Options::default()).unwrap());
+                loops.push((Loop::Edges(vec![(id, true)]), true));
+            }
+            let face = Face {
+                id: 1,
+                surface: Surface::Torus {
+                    frame: frame(),
+                    major,
+                    minor,
+                },
+                same_sense: true,
+                outer: None,
+                loops,
+            };
+            let fm = tessellate_face(&face, &polys, &Options::default()).unwrap();
+            let got = area(&fm, &polys);
+            assert!(
+                (got - want).abs() < 1e-3 * want,
+                "first way {first_way}: {got} vs {want}"
+            );
+        }
+    }
+
+    #[test]
     fn plane_with_a_parameter_a_hair_from_zero() {
         // Exporters write coordinates such as 1e-45 for zero; the triangulation takes no
         // magnitude that small but zero.
