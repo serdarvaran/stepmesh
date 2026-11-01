@@ -7,7 +7,8 @@
 //! STEPMESH_DISPUTED (lines `path<TAB>reason`: files whose OpenCascade reference was shown to be
 //! wrong; reported as "reference disputed", never as ok).
 //! A file passes when stepmesh returns an error, or returns solids whose count matches, whose
-//! bounds are within 0.1 % of the diagonal, and whose volume is within 0.1 % of OpenCascade's own
+//! bounds are within 0.1 % of the diagonal (or the deflections of both meshes on small parts),
+//! and whose volume is within 0.1 % of OpenCascade's own
 //! mesh at the same tolerances or within max(0.1 %, deflection x area) of its exact B-rep volume (a
 //! mesh within the deflection of the surface cannot be closer than that). Anything else read
 //! without an error is WRONG; the gate allows none, and no panic or timeout either. The share of
@@ -19,6 +20,10 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use stepmesh::{Error, Options, StepMesh, read_step};
+
+/// Floor of the deflection of the fine OpenCascade mesh the reference takes its bounds from
+/// (reference/occt_reference.py), in millimetres.
+const REFERENCE_BOUNDS_DEFLECTION: f64 = 0.01;
 
 struct Reference {
     solids: usize,
@@ -115,7 +120,11 @@ fn judge(m: &StepMesh, r: &Reference) -> Result<(), String> {
             r.volume, r.mesh_volume
         ));
     }
-    if bounds > 1e-3 * diag {
+    // The reference bounds come from a mesh at no finer than REFERENCE_BOUNDS_DEFLECTION: on a
+    // small part they cannot settle 0.1 % of the diagonal.
+    let bounds_allowed =
+        (1e-3 * diag).max(REFERENCE_BOUNDS_DEFLECTION + Options::default().linear_deflection);
+    if bounds > bounds_allowed {
         return Err(format!("bounds off by {bounds} (diagonal {diag})"));
     }
     Ok(())

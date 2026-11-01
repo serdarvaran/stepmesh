@@ -606,6 +606,31 @@ mod seamless {
                 (got - want).abs() < 1e-3 * want,
                 "first way {first_way}: {got} vs {want}"
             );
+            // Facing out of the tube, as the face's sense says.
+            let pt = |r: VRef| match r {
+                VRef::Edge { edge, i } => polys[&edge][i],
+                VRef::Inner(i) => fm.inner[i],
+            };
+            for t in &fm.tris {
+                let [a, b, c] = t.map(pt);
+                let (u, v) = (
+                    [b[0] - a[0], b[1] - a[1], b[2] - a[2]],
+                    [c[0] - a[0], c[1] - a[1], c[2] - a[2]],
+                );
+                let n = [
+                    u[1] * v[2] - u[2] * v[1],
+                    u[2] * v[0] - u[0] * v[2],
+                    u[0] * v[1] - u[1] * v[0],
+                ];
+                let m = [(a[0] + b[0] + c[0]) / 3.0, (a[1] + b[1] + c[1]) / 3.0];
+                let ring = major / (m[0] * m[0] + m[1] * m[1]).sqrt();
+                let out = [
+                    m[0] * (1.0 - ring),
+                    m[1] * (1.0 - ring),
+                    (a[2] + b[2] + c[2]) / 3.0,
+                ];
+                assert!(n[0] * out[0] + n[1] * out[1] + n[2] * out[2] > 0.0);
+            }
         }
     }
 
