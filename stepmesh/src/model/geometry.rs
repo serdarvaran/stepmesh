@@ -5,6 +5,9 @@ use crate::Error;
 use crate::geom::{Curve, MAX_DEGREE, Nurbs1, Nurbs2, Surface, expand_knots};
 use crate::p21::{Record, Value};
 
+/// Wrappers (surface curves, trimmed curves) allowed around one curve.
+const MAX_CURVE_NESTING: usize = 8;
+
 /// Records that give a B-spline curve its knots, explicitly or by form.
 const CURVE_FORMS: [&str; 4] = [
     "B_SPLINE_CURVE_WITH_KNOTS",
@@ -52,6 +55,14 @@ impl Decoder<'_> {
     }
 
     pub(crate) fn curve(&self, id: u64, units: Units) -> Result<Curve, Error> {
+        self.nested_curve(id, units, 0)
+    }
+
+    /// `depth` counts wrappers (surface curves, trimmed curves) around the curve read.
+    fn nested_curve(&self, id: u64, units: Units, depth: usize) -> Result<Curve, Error> {
+        if depth > MAX_CURVE_NESTING {
+            return self.invalid(id, "curves wrapped too deeply or in a cycle");
+        }
         let e = self.entity(id)?;
         if e.records
             .iter()
@@ -69,19 +80,21 @@ impl Decoder<'_> {
             }
             "CIRCLE" => Ok(Curve::Circle {
                 frame: self.frame(self.reference(id, r.params.get(1))?, s)?,
-                r: self.real(id, r.params.get(2))? * s,
+                r: self.length(id, r.params.get(2), s, false)?,
             }),
             "ELLIPSE" => Ok(Curve::Ellipse {
                 frame: self.frame(self.reference(id, r.params.get(1))?, s)?,
-                a: self.real(id, r.params.get(2))? * s,
-                b: self.real(id, r.params.get(3))? * s,
+                a: self.length(id, r.params.get(2), s, false)?,
+                b: self.length(id, r.params.get(3), s, false)?,
             }),
             // The 3D curve; pcurves are not read (boundary points are projected onto the surface).
             "SURFACE_CURVE" | "SEAM_CURVE" | "INTERSECTION_CURVE" => {
-                self.curve(self.reference(id, r.params.get(1))?, units)
+                self.nested_curve(self.reference(id, r.params.get(1))?, units, depth + 1)
             }
             // Edges are trimmed by their vertices, so the basis curve is enough.
-            "TRIMMED_CURVE" => self.curve(self.reference(id, r.params.get(1))?, units),
+            "TRIMMED_CURVE" => {
+                self.nested_curve(self.reference(id, r.params.get(1))?, units, depth + 1)
+            }
             _ => self.unsupported(id),
         }
     }
@@ -112,6 +125,40 @@ impl Decoder<'_> {
         Ok((b, knots, 0))
     }
 
+    /// Finite, non-decreasing knots with a parameter range of positive length.
+    fn check_knots(&self, id: u64, k: &[f64], n: usize, p: usize) -> Result<(), Error> {
+        let ordered = k.iter().all(|x| x.is_finite()) && k.windows(2).all(|w| w[0] <= w[1]);
+        if !ordered || n <= p || k[p] >= k[n] {
+            return self.invalid(id, "knots not increasing over the parameter range");
+        }
+        Ok(())
+    }
+
+    /// Weight of a rational B-spline: finite and positive.
+    fn check_weight(&self, id: u64, w: f64) -> Result<f64, Error> {
+        if w.is_finite() && w > 0.0 {
+            Ok(w)
+        } else {
+            self.invalid(id, "weight not positive")
+        }
+    }
+
+    /// A length in millimetres: finite and, unless `zero_ok`, positive.
+    pub(crate) fn length(
+        &self,
+        id: u64,
+        v: Option<&Value>,
+        mm: f64,
+        zero_ok: bool,
+    ) -> Result<f64, Error> {
+        let l = self.real(id, v)? * mm;
+        if l.is_finite() && (l > 0.0 || (zero_ok && l == 0.0)) {
+            Ok(l)
+        } else {
+            self.invalid(id, "length not positive or out of range")
+        }
+    }
+
     /// Knot vector of `n` control points of degree `p`: explicit (`*_WITH_KNOTS`, from the
     /// multiplicities and values at `at` and `at + offset`) or implied by the form (ISO 10303-42).
     fn knot_vector(
@@ -127,7 +174,14 @@ impl Decoder<'_> {
         if kind.ends_with("_WITH_KNOTS") {
             let mults = self.integers(id, form.params.get(at))?;
             let ks = self.reals(id, form.params.get(at + offset))?;
-            return Ok(expand_knots(&mults, &ks));
+            // Checked before expanding: a file can ask for any multiplicity.
+            let total = mults.iter().try_fold(0usize, |a, &m| a.checked_add(m));
+            if mults.len() != ks.len() || total != Some(n + p + 1) {
+                return self.invalid(id, "knot multiplicities do not fit the control points");
+            }
+            let knots = expand_knots(&mults, &ks);
+            self.check_knots(id, &knots, n, p)?;
+            return Ok(knots);
         }
         if n <= p {
             return self.invalid(id, "fewer control points than the degree needs");
@@ -184,10 +238,12 @@ impl Decoder<'_> {
         if degree == 0 || w.len() != pts.len() || knots.len() != pts.len() + degree + 1 {
             return self.invalid(id, "inconsistent B-spline curve");
         }
+        self.check_knots(id, &knots, pts.len(), degree)?;
         let ctrl = pts
             .iter()
             .zip(&w)
             .map(|(&p, &w)| {
+                let w = self.check_weight(id, w)?;
                 self.point(p, units.length_mm)
                     .map(|q| [q[0] * w, q[1] * w, q[2] * w, w])
             })
@@ -210,7 +266,7 @@ impl Decoder<'_> {
         let r = &e.records[0];
         let s = units.length_mm;
         let frame = |i: usize| self.frame(self.reference(id, r.params.get(i))?, s);
-        let len = |i: usize| self.real(id, r.params.get(i)).map(|v| v * s);
+        let len = |i: usize| self.length(id, r.params.get(i), s, false);
         match r.name.as_str() {
             "PLANE" => Ok(Surface::Plane(frame(1)?)),
             "CYLINDRICAL_SURFACE" => Ok(Surface::Cylinder {
@@ -219,7 +275,7 @@ impl Decoder<'_> {
             }),
             "CONICAL_SURFACE" => Ok(Surface::Cone {
                 frame: frame(1)?,
-                r: len(2)?,
+                r: self.length(id, r.params.get(2), s, true)?,
                 half_angle: self.real(id, r.params.get(3))? * units.angle_rad,
             }),
             "SPHERICAL_SURFACE" => Ok(Surface::Sphere {
@@ -297,6 +353,7 @@ impl Decoder<'_> {
                         .map_or_else(|| self.invalid(id, "weights"), Ok)?,
                     None => 1.0,
                 };
+                let w = self.check_weight(id, w)?;
                 let q = self.point(p, units.length_mm)?;
                 out.push([q[0] * w, q[1] * w, q[2] * w, w]);
             }
@@ -312,6 +369,8 @@ impl Decoder<'_> {
         {
             return self.invalid(id, "inconsistent B-spline surface");
         }
+        self.check_knots(id, &ku, nu, du)?;
+        self.check_knots(id, &kv, nv, dv)?;
         Ok(Surface::Nurbs(Nurbs2 {
             du,
             dv,

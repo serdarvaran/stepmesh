@@ -120,6 +120,9 @@ impl Decoder<'_> {
             "ORIENTED_CLOSED_SHELL" => {
                 let inner = self.reference(id, r.params.get(2))?;
                 let orientation = self.flag(id, r.params.get(3))?;
+                if self.first(inner)?.name != "CLOSED_SHELL" {
+                    return self.invalid(id, "an oriented shell must orient a CLOSED_SHELL");
+                }
                 self.shell(inner, void, reversed != !orientation, units, edges)
                     .map(|s| Shell { id, ..s })
             }

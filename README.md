@@ -44,8 +44,11 @@ for solid in &mesh.solids {
 | Curves | `LINE`, `CIRCLE`, `ELLIPSE`, B-spline curves (same forms), `SURFACE_CURVE`, `SEAM_CURVE`, `INTERSECTION_CURVE`, `TRIMMED_CURVE` |
 
 Not read yet, each an explicit error: `OFFSET_SURFACE`, `RECTANGULAR_TRIMMED_SURFACE`, AP242
-tessellated shapes, faceted B-reps and CSG solids, open shells and surface models (no volume),
-references to external documents, B-splines above degree 16.
+tessellated shapes, faceted B-reps and CSG solids, any other representation item that is not
+wireframe or annotation, open shells and surface models (no volume), assembly components without
+a shape (references to external documents), mirroring or scaling transformations, B-splines above
+degree 16. Malformed input (cyclic references, inconsistent B-splines, out-of-range values, more
+than 100 000 placed solids) is an `Error` too, never a panic or a hang.
 
 ## How it meshes
 

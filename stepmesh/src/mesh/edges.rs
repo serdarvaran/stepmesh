@@ -6,14 +6,16 @@ use crate::{Error, Options};
 
 /// Bisection depth limit for B-spline edges (2^24 segments at most).
 const MAX_DEPTH: usize = 24;
+/// Samples of one conic edge beyond which the input is taken as out of range.
+const MAX_EDGE_SAMPLES: usize = 10_000_000;
 
 /// Polyline from `e.start` to `e.end` (both exact) within the chord and angle tolerances.
 pub fn discretize_edge(e: &Edge, o: &Options) -> Result<Vec<P3>, Error> {
     let (t_start, t_end) = param_span(e);
     let mut ts = match &e.curve {
         Curve::Line { .. } => vec![t_start, t_end],
-        Curve::Circle { r, .. } => uniform(t_start, t_end, *r, o),
-        Curve::Ellipse { a, b, .. } => uniform(t_start, t_end, a.max(*b), o),
+        Curve::Circle { r, .. } => uniform(t_start, t_end, *r, o)?,
+        Curve::Ellipse { a, b, .. } => uniform(t_start, t_end, a.max(*b), o)?,
         Curve::Nurbs(n) => {
             let mut cuts = vec![t_start];
             let (lo, hi) = (t_start.min(t_end), t_start.max(t_end));
@@ -77,7 +79,7 @@ fn param_span(e: &Edge) -> (f64, f64) {
 }
 
 /// Equal parameter steps for a conic whose largest radius is `r`.
-fn uniform(t0: f64, t1: f64, r: f64, o: &Options) -> Vec<f64> {
+fn uniform(t0: f64, t1: f64, r: f64, o: &Options) -> Result<Vec<f64>, Error> {
     let chord_step = if o.linear_deflection < r {
         2.0 * (1.0 - o.linear_deflection / r).acos()
     } else {
@@ -86,10 +88,17 @@ fn uniform(t0: f64, t1: f64, r: f64, o: &Options) -> Vec<f64> {
     let step = chord_step
         .min(o.angular_deflection)
         .min(std::f64::consts::FRAC_PI_2);
-    let n = ((t1 - t0).abs() / step).ceil().max(1.0) as usize;
-    (0..=n)
+    let n = ((t1 - t0).abs() / step).ceil().max(1.0);
+    if n > MAX_EDGE_SAMPLES as f64 {
+        return Err(Error::TriangleLimit {
+            count: n as usize,
+            limit: MAX_EDGE_SAMPLES,
+        });
+    }
+    let n = n as usize;
+    Ok((0..=n)
         .map(|i| t0 + (t1 - t0) * i as f64 / n as f64)
-        .collect()
+        .collect())
 }
 
 /// Parameters from `a` to `b` (both included) of a curve given by point and derivative.

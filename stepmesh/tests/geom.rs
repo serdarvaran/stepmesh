@@ -584,3 +584,39 @@ fn implicit_knot_surface_matches_explicit_one() {
         }
     }
 }
+
+#[test]
+fn bspline_closed_within_tolerance() {
+    // First and last rows of control points 1e-6 mm apart: closed for meshing.
+    let mut rng = Rng(21);
+    let mut patch = nurbs_patch(&mut rng);
+    let last = patch.ctrl.len() - 1;
+    patch.ctrl[last] = patch.ctrl[0]
+        .iter()
+        .map(|c| [c[0] + 1e-6 * c[3], c[1], c[2], c[3]])
+        .collect();
+    assert!(Surface::Nurbs(patch).period().0.is_some());
+}
+
+#[test]
+fn unclamped_periodic_surface_is_closed() {
+    // Uniform knots, the first two rows repeated at the end: a closed tube of degree 2 along u.
+    let ring = |a: f64| {
+        (0..3)
+            .map(|j| [5.0 * a.cos(), 5.0 * a.sin(), j as f64, 1.0])
+            .collect::<Vec<_>>()
+    };
+    let rows: Vec<Vec<[f64; 4]>> = (0..6)
+        .map(|i| ring(std::f64::consts::TAU * (i % 4) as f64 / 4.0))
+        .collect();
+    let s = Surface::Nurbs(Nurbs2 {
+        du: 2,
+        dv: 1,
+        ku: (0..9).map(|i| i as f64).collect(),
+        kv: vec![0.0, 0.0, 1.0, 2.0, 2.0],
+        ctrl: rows,
+        closed_u: true,
+        closed_v: false,
+    });
+    assert_eq!(s.period().0, Some(4.0));
+}

@@ -8,6 +8,37 @@ use crate::p21::{Exchange, Value};
 
 /// Deeper assembly trees than this are treated as malformed.
 const MAX_ASSEMBLY_DEPTH: usize = 64;
+/// More placed solids than this (instances counted) are treated as malformed: a few levels of
+/// shared sub-assemblies can multiply into billions.
+const MAX_PLACED_SOLIDS: u64 = 100_000;
+
+/// Representation items that carry no solid geometry and are left out on purpose.
+const PASSIVE_ITEMS: [&str; 9] = [
+    "AXIS2_PLACEMENT_3D",
+    "AXIS2_PLACEMENT_2D",
+    "AXIS1_PLACEMENT",
+    "CARTESIAN_POINT",
+    "DIRECTION",
+    "VECTOR",
+    "GEOMETRIC_CURVE_SET",
+    "GEOMETRIC_SET",
+    "VERTEX_POINT",
+];
+/// Name parts of wireframe and presentation items (annotations, PMI), also left out.
+const PASSIVE_KINDS: [&str; 12] = [
+    "CURVE",
+    "LINE",
+    "CIRCLE",
+    "ELLIPSE",
+    "POINT",
+    "PLACEMENT",
+    "ANNOTATION",
+    "DRAUGHTING",
+    "CALLOUT",
+    "LEADER",
+    "TEXT",
+    "DIMENSION",
+];
 
 const SOLID_ITEMS: [&str; 2] = ["MANIFOLD_SOLID_BREP", "BREP_WITH_VOIDS"];
 const SURFACE_ITEMS: [&str; 2] = ["SHELL_BASED_SURFACE_MODEL", "FACE_BASED_SURFACE_MODEL"];
@@ -37,6 +68,10 @@ struct Builder<'a> {
     parts: Vec<Part>,
     index: HashMap<Key, usize>,
     surfaces: Vec<u64>,
+    /// Parts being read, innermost last: guards the recursion through mapped items.
+    building: Vec<Key>,
+    /// Assembly usages (NEXT_ASSEMBLY_USAGE_OCCURRENCE id, child part), checked for a shape.
+    uses: Vec<(u64, usize)>,
 }
 
 pub fn decode_model(x: &Exchange) -> Result<Model, Error> {
@@ -48,6 +83,8 @@ pub fn decode_model(x: &Exchange) -> Result<Model, Error> {
         parts: Vec::new(),
         index: HashMap::new(),
         surfaces: Vec::new(),
+        building: Vec::new(),
+        uses: Vec::new(),
     };
     b.collect_shape_definitions()?;
     b.collect_links()?;
@@ -60,9 +97,24 @@ pub fn decode_model(x: &Exchange) -> Result<Model, Error> {
         parts: b.parts,
         roots,
     };
-    let mut solids = 0;
-    for r in &model.roots {
-        solids += count_solids(&model, r.part, &mut Vec::new())?;
+    let counts = solid_counts(&model)?;
+    for &(nauo, part) in &b.uses {
+        if counts[part] == 0 {
+            return Err(Error::Unsupported {
+                entity: "assembly component without a shape".into(),
+                id: nauo,
+            });
+        }
+    }
+    let solids = model
+        .roots
+        .iter()
+        .fold(0u64, |a, r| a.saturating_add(counts[r.part]));
+    if solids > MAX_PLACED_SOLIDS {
+        return Err(Error::Invalid {
+            id: 0,
+            msg: format!("more than {MAX_PLACED_SOLIDS} placed solids"),
+        });
     }
     if solids == 0 {
         return match b.surfaces.first() {
@@ -73,21 +125,47 @@ pub fn decode_model(x: &Exchange) -> Result<Model, Error> {
     Ok(model)
 }
 
-/// Solid count of a part with its sub-parts; an assembly that contains itself is an error.
-fn count_solids(m: &Model, part: usize, stack: &mut Vec<usize>) -> Result<usize, Error> {
-    if stack.contains(&part) || stack.len() > MAX_ASSEMBLY_DEPTH {
-        return Err(Error::Invalid {
-            id: 0,
-            msg: "assembly contains itself or is nested too deeply".into(),
-        });
+/// Placed solid count of every part with its sub-parts (instances counted, saturating); an
+/// assembly that contains itself or nests too deeply is an error.
+fn solid_counts(m: &Model) -> Result<Vec<u64>, Error> {
+    fn visit(
+        m: &Model,
+        part: usize,
+        depth: usize,
+        state: &mut [u8],
+        counts: &mut [u64],
+    ) -> Result<u64, Error> {
+        match state[part] {
+            2 => return Ok(counts[part]),
+            1 => {
+                return Err(Error::Invalid {
+                    id: 0,
+                    msg: "assembly contains itself".into(),
+                });
+            }
+            _ if depth > MAX_ASSEMBLY_DEPTH => {
+                return Err(Error::Invalid {
+                    id: 0,
+                    msg: "assembly nested too deeply".into(),
+                });
+            }
+            _ => {}
+        }
+        state[part] = 1;
+        let mut n = m.parts[part].breps.len() as u64;
+        for c in &m.parts[part].children {
+            n = n.saturating_add(visit(m, c.part, depth + 1, state, counts)?);
+        }
+        state[part] = 2;
+        counts[part] = n;
+        Ok(n)
     }
-    stack.push(part);
-    let mut n = m.parts[part].breps.len();
-    for c in &m.parts[part].children {
-        n += count_solids(m, c.part, stack)?;
+    let mut state = vec![0u8; m.parts.len()];
+    let mut counts = vec![0u64; m.parts.len()];
+    for p in 0..m.parts.len() {
+        visit(m, p, 0, &mut state, &mut counts)?;
     }
-    stack.pop();
-    Ok(n)
+    Ok(counts)
 }
 
 impl Builder<'_> {
@@ -173,9 +251,13 @@ impl Builder<'_> {
         if let Some(&i) = self.index.get(&key) {
             return Ok(i);
         }
+        if self.building.len() > MAX_ASSEMBLY_DEPTH {
+            return self.d.invalid(0, "representations mapped too deeply");
+        }
         let i = self.parts.len();
         self.index.insert(key, i);
         self.parts.push(Part::default());
+        self.building.push(key);
         let (reps, owner) = match key {
             Key::Product(pd) => {
                 self.parts[i].name = self.product_name(pd);
@@ -189,6 +271,7 @@ impl Builder<'_> {
         for rep in self.closure(&reps, owner) {
             self.add_items(i, rep)?;
         }
+        self.building.pop();
         Ok(i)
     }
 
@@ -218,8 +301,12 @@ impl Builder<'_> {
                     .find(|r| names.contains(&r.name.as_str()))
                     .map(|r| r.name.clone())
             };
+            let name = e.records[0].name.as_str();
             if has(&SOLID_ITEMS).is_some() {
-                self.parts[part].breps.push((item, units));
+                // A solid listed by two linked representations is one solid.
+                if !self.parts[part].breps.iter().any(|&(b, _)| b == item) {
+                    self.parts[part].breps.push((item, units));
+                }
             } else if has(&SURFACE_ITEMS).is_some() {
                 self.surfaces.push(item);
             } else if let Some(name) = has(&UNSUPPORTED_SOLIDS) {
@@ -227,9 +314,16 @@ impl Builder<'_> {
                     entity: name,
                     id: item,
                 });
-            } else if e.records[0].name == "MAPPED_ITEM" {
+            } else if name == "MAPPED_ITEM" {
                 let child = self.mapped_item(item, units)?;
                 self.parts[part].children.push(child);
+            } else if !(PASSIVE_ITEMS.contains(&name)
+                || PASSIVE_KINDS.iter().any(|k| name.contains(k)))
+            {
+                return Err(Error::Unsupported {
+                    entity: name.to_string(),
+                    id: item,
+                });
             }
         }
         Ok(())
@@ -261,18 +355,33 @@ impl Builder<'_> {
         if e.records.iter().any(|r| r.name == "AXIS2_PLACEMENT_3D") {
             return Ok(Transform::from(&self.d.frame(id, scale)?));
         }
-        let Some(op) = e
+        // CARTESIAN_TRANSFORMATION_OPERATOR(_3D): (axis1, axis2, local_origin, scale[, axis3]),
+        // after name and description on a simple instance.
+        let (params, axis3): (Vec<&Value>, Option<&Value>) = match e
             .records
             .iter()
             .find(|r| r.name == "CARTESIAN_TRANSFORMATION_OPERATOR")
-        else {
-            return Err(Error::Unsupported {
-                entity: e.records[0].name.clone(),
-                id,
-            });
+        {
+            Some(op) => (
+                op.params.iter().collect(),
+                e.records
+                    .iter()
+                    .find(|r| r.name == "CARTESIAN_TRANSFORMATION_OPERATOR_3D")
+                    .and_then(|r| r.params.first()),
+            ),
+            None if e.records[0].name == "CARTESIAN_TRANSFORMATION_OPERATOR_3D" => {
+                let p = &e.records[0].params;
+                (p.iter().skip(2).collect(), p.get(6))
+            }
+            None => {
+                return Err(Error::Unsupported {
+                    entity: e.records[0].name.clone(),
+                    id,
+                });
+            }
         };
-        if let Some(Value::Real(s)) = op.params.get(3) {
-            if (s - 1.0).abs() > 1e-12 {
+        if let Some(s) = params.get(3).filter(|v| !matches!(v, Value::Unset)) {
+            if (self.d.real(id, Some(s))? - 1.0).abs() > 1e-12 {
                 return Err(Error::Unsupported {
                     entity: "scaling CARTESIAN_TRANSFORMATION_OPERATOR".into(),
                     id,
@@ -285,22 +394,32 @@ impl Builder<'_> {
                 .map(|a| self.d.direction(a))
                 .transpose()
         };
-        let x = dir(op.params.first())?.unwrap_or([1.0, 0.0, 0.0]);
-        let y = dir(op.params.get(1))?;
         let origin = self
             .d
-            .point(self.d.reference(id, op.params.get(2))?, scale)?;
-        let z = match e
-            .records
-            .iter()
-            .find(|r| r.name == "CARTESIAN_TRANSFORMATION_OPERATOR_3D")
-        {
-            Some(r3) => dir(r3.params.first())?,
-            None => None,
+            .point(self.d.reference(id, params.get(2).copied())?, scale)?;
+        // ISO 10303-42 base_axis: z from axis3, x from axis1 made orthogonal to z, y from axis2
+        // made orthogonal to both (or z × x).
+        let z = dir(axis3)?.unwrap_or([0.0, 0.0, 1.0]);
+        let x0 = dir(params.first().copied())?.unwrap_or([1.0, 0.0, 0.0]);
+        let Some(x) = super::unit(super::sub(x0, super::mul(z, super::dot(x0, z)))) else {
+            return self.d.invalid(id, "axis1 parallel to axis3");
         };
-        let z = z
-            .or_else(|| y.map(|y| super::cross(x, y)))
-            .unwrap_or([0.0, 0.0, 1.0]);
+        let natural = super::cross(z, x);
+        if let Some(y0) = dir(params.get(1).copied())? {
+            let y = super::sub(
+                super::sub(y0, super::mul(x, super::dot(y0, x))),
+                super::mul(z, super::dot(y0, z)),
+            );
+            let Some(y) = super::unit(y) else {
+                return self.d.invalid(id, "axis2 parallel to the other axes");
+            };
+            if super::dot(y, natural) < 0.0 {
+                return Err(Error::Unsupported {
+                    entity: "mirroring CARTESIAN_TRANSFORMATION_OPERATOR".into(),
+                    id,
+                });
+            }
+        }
         Ok(Transform::from_frame(origin, z, x))
     }
 
@@ -324,7 +443,20 @@ impl Builder<'_> {
                 None if self.parts[p].children.iter().any(|i| i.part == c) => continue,
                 None => Transform::identity(),
             };
-            self.parts[p].children.push(Instance { part: c, transform });
+            self.uses.push((nauo, c));
+            // The same occurrence placed by a MAPPED_ITEM as well is one instance.
+            let same = |i: &Instance| {
+                i.part == c
+                    && i.transform
+                        .m
+                        .iter()
+                        .flatten()
+                        .zip(transform.m.iter().flatten())
+                        .all(|(a, b)| (a - b).abs() < 1e-9)
+            };
+            if !self.parts[p].children.iter().any(same) {
+                self.parts[p].children.push(Instance { part: c, transform });
+            }
         }
         let mut roots = Vec::new();
         let pds: Vec<u64> = self.product_reps.keys().copied().collect();
@@ -400,6 +532,11 @@ impl Builder<'_> {
     /// Files without product structure: every representation that holds a solid is a root.
     fn loose_roots(&mut self) -> Result<Vec<Instance>, Error> {
         let mut roots = Vec::new();
+        // A representation placed by a MAPPED_ITEM appears where it is mapped, not on its own.
+        let mut mapped = HashSet::new();
+        for map in self.d.all("REPRESENTATION_MAP") {
+            mapped.insert(self.d.reference(map, self.d.first(map)?.params.get(1))?);
+        }
         let mut reps: Vec<u64> = self
             .d
             .x
@@ -409,16 +546,16 @@ impl Builder<'_> {
             .map(|(id, _)| *id)
             .collect();
         reps.sort_unstable();
-        for rep in reps {
+        for rep in reps.into_iter().filter(|r| !mapped.contains(r)) {
             let holds_solid = self
                 .d
                 .references(rep, self.d.first(rep)?.params.get(1))
                 .is_ok_and(|items| {
                     items.iter().any(|&i| {
                         self.d.entity(i).is_ok_and(|e| {
-                            e.records
-                                .iter()
-                                .any(|r| SOLID_ITEMS.contains(&r.name.as_str()))
+                            e.records.iter().any(|r| {
+                                SOLID_ITEMS.contains(&r.name.as_str()) || r.name == "MAPPED_ITEM"
+                            })
                         })
                     })
                 });

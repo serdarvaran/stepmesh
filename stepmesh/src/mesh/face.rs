@@ -14,6 +14,10 @@ use crate::{Error, Options};
 /// Refinement passes over the face; each inserts the centroid or edge midpoints of every
 /// triangle that is still too far from the surface.
 const MAX_REFINE_ROUNDS: usize = 40;
+/// Ratio of the parameter derivatives below which a direction counts as collapsed.
+const COLLAPSED: f64 = 1e-5;
+/// Most copies of one pole along its parameter row.
+const MAX_POLE_COPIES: usize = 64;
 /// A boundary point may lie this far from the face's surface: files carry edge curves that
 /// leave their faces by their modelling tolerance (0.08 mm seen in CAx-IF test data).
 const ON_SURFACE: f64 = 0.1;
@@ -125,10 +129,13 @@ impl Ctx<'_> {
     }
 
     /// Whether the surface collapses along u (or v) at this parameter point.
+    /// A direction counts as collapsed when its derivative is tiny next to the other one: a
+    /// boundary point a hair off a pole (file tolerance) is still the pole.
     fn singular(&self, uv: (f64, f64)) -> (bool, bool) {
         let (p, su, sv) = self.s.derivs(uv.0, uv.1);
-        let scale = 1e-9 * (1.0 + norm(p)).max(norm(su).max(norm(sv)));
-        (norm(su) <= scale, norm(sv) <= scale)
+        let (a, b) = (norm(su), norm(sv));
+        let floor = 1e-9 * (1.0 + norm(p));
+        (a <= floor.max(COLLAPSED * b), b <= floor.max(COLLAPSED * a))
     }
 
     /// Parameters of a loop, continuous across periodic seams. A point where the surface
@@ -228,9 +235,7 @@ impl Ctx<'_> {
             }
             let (a, b) = (neighbour(i, -1), neighbour(i, 1));
             let (from, to) = if sing[i].0 { (a.0, b.0) } else { (a.1, b.1) };
-            let steps = ((to - from).abs() / self.o.angular_deflection.min(0.5))
-                .ceil()
-                .max(1.0) as usize;
+            let steps = self.pole_steps(to - from);
             for k in 0..=steps {
                 let x = from + (to - from) * k as f64 / steps as f64;
                 let uv = if sing[i].0 { (x, q.1) } else { (q.0, x) };
@@ -319,9 +324,7 @@ impl Ctx<'_> {
             uv: (b.uv.0 + du, b.uv.1),
             ..*b
         }));
-        let steps = (du.abs() / self.o.angular_deflection.min(0.5))
-            .ceil()
-            .max(1.0) as usize;
+        let steps = self.pole_steps(du);
         for k in 0..=steps {
             let u = end - du * k as f64 / steps as f64;
             l.push(BPoint {
@@ -432,6 +435,15 @@ impl Ctx<'_> {
         }
     }
 
+    /// Copies of a pole along a parameter span: one per angular step, at most `MAX_POLE_COPIES`
+    /// (a B-spline's parameter span need not be an angle).
+    fn pole_steps(&self, span: f64) -> usize {
+        ((span.abs() / self.o.angular_deflection.min(0.5))
+            .ceil()
+            .max(1.0) as usize)
+            .min(MAX_POLE_COPIES)
+    }
+
     fn new_inner(&mut self, p: P3) -> VRef {
         self.inner.push(p);
         VRef::Inner(self.inner.len() - 1)
@@ -458,7 +470,7 @@ impl Ctx<'_> {
         let bottom_collapsed = self.singular((u0, v0)).0;
         let top_collapsed = self.singular((u0, v1)).0;
         let us = if bottom_collapsed {
-            let n = (pu / o.angular_deflection.min(0.5)).ceil() as usize;
+            let n = self.pole_steps(pu);
             (0..=n)
                 .map(|i| u0 + (u1 - u0) * i as f64 / n as f64)
                 .collect()
@@ -574,6 +586,12 @@ impl Ctx<'_> {
         let mut checked = Checked::default();
         for _ in 0..if planar { 0 } else { MAX_REFINE_ROUNDS } {
             let inside = classify(&cdt);
+            if let Some(limit) = self.o.max_triangles {
+                let count = cdt.num_inner_faces();
+                if count > limit {
+                    return Err(Error::TriangleLimit { count, limit });
+                }
+            }
             let candidates = self.refinement_points(&cdt, &inside, &info, &mut checked);
             if candidates.is_empty() {
                 break;

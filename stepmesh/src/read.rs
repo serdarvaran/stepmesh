@@ -58,6 +58,17 @@ pub struct StepMesh {
 /// A solid whose mesh would not be closed and consistently oriented, or that uses an entity this
 /// crate does not read, fails the whole call: no partial or approximate result is returned.
 pub fn read_step(bytes: &[u8], options: &Options) -> Result<StepMesh, Error> {
+    let positive = |v: f64| v.is_finite() && v > 0.0;
+    if !positive(options.linear_deflection) {
+        return Err(Error::InvalidOptions(
+            "linear_deflection must be finite and positive",
+        ));
+    }
+    if !positive(options.angular_deflection) || options.angular_deflection > std::f64::consts::PI {
+        return Err(Error::InvalidOptions(
+            "angular_deflection must be in (0, pi]",
+        ));
+    }
     let x = p21::parse(bytes)?;
     let model = decode_model(&x)?;
     let d = Decoder::new(&x);

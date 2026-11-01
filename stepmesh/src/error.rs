@@ -32,6 +32,8 @@ pub enum Error {
         count: usize,
         limit: usize,
     },
+    /// `Options` out of range (zero, negative or non-finite tolerance).
+    InvalidOptions(&'static str),
     /// A face could not be laid out in its surface's parameter space.
     Projection {
         face: u64,
@@ -43,6 +45,7 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::NotStep => write!(f, "not a STEP (ISO 10303-21) file"),
+            Error::InvalidOptions(what) => write!(f, "invalid options: {what}"),
             Error::Syntax { line, msg } => write!(f, "syntax error on line {line}: {msg}"),
             Error::Unsupported { entity, id } => write!(f, "unsupported entity {entity} (#{id})"),
             Error::Invalid { id, msg } => write!(f, "invalid instance #{id}: {msg}"),

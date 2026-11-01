@@ -137,10 +137,15 @@ impl Decoder<'_> {
     pub(crate) fn point(&self, id: u64, scale: f64) -> Result<P3, Error> {
         let r = self.record(id, "CARTESIAN_POINT")?;
         let c = self.reals(id, r.params.get(1))?;
-        match c[..] {
-            [x, y, z] => Ok([x * scale, y * scale, z * scale]),
-            [x, y] => Ok([x * scale, y * scale, 0.0]),
-            _ => self.invalid(id, "point needs 2 or 3 coordinates"),
+        let p = match c[..] {
+            [x, y, z] => [x * scale, y * scale, z * scale],
+            [x, y] => [x * scale, y * scale, 0.0],
+            _ => return self.invalid(id, "point needs 2 or 3 coordinates"),
+        };
+        if p.iter().all(|v| v.is_finite()) {
+            Ok(p)
+        } else {
+            self.invalid(id, "coordinate out of range")
         }
     }
 

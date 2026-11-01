@@ -669,3 +669,120 @@ fn quarter_sphere_through_a_pole() {
         let _ = FRAC_PI_2;
     }
 }
+
+#[test]
+fn quarter_sphere_through_a_pole_vertex_slightly_off() {
+    use std::collections::HashMap;
+    use std::f64::consts::{FRAC_PI_2, PI};
+    use stepmesh::internals::{Face, Loop, Surface, VRef, tessellate_face};
+    // Sphere r = 10 about z. Face: the lune between the meridians u = 0 and u = pi below the
+    // equator: half the equator (u from pi down to 0) then down the meridian u = 0 to the south
+    // pole and up the meridian u = pi. Its loop passes through the pole instead of round it.
+    let r = 10.0;
+    let f = Frame::new([0.0; 3], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]).unwrap();
+    let s = Surface::Sphere {
+        frame: f.clone(),
+        r,
+    };
+    let o = Options::default();
+    // The pole vertex a little off the pole, as file tolerances leave it.
+    for off in [
+        [0.0, 1e-7, 0.0],
+        [1e-7, 0.0, 0.0],
+        [-1e-7, -1e-7, 0.0],
+        [3e-6, -2e-6, 0.0],
+        [0.0, -1e-6, 0.0],
+    ] {
+        let south = [off[0], off[1], -r];
+        let equator = Curve::Circle {
+            frame: f.clone(),
+            r,
+        };
+        // Meridian circles: in the xz plane (through u = 0 and u = pi).
+        let meridian = Curve::Circle {
+            frame: Frame::new([0.0; 3], [0.0, -1.0, 0.0], [1.0, 0.0, 0.0]).unwrap(),
+            r,
+        };
+        let edges = [
+            (
+                1,
+                Edge {
+                    curve: equator,
+                    start: [-r, 0.0, 0.0],
+                    end: [r, 0.0, 0.0],
+                    start_vertex: 10,
+                    end_vertex: 11,
+                    same_sense: false,
+                },
+            ),
+            (
+                2,
+                Edge {
+                    curve: meridian.clone(),
+                    start: [r, 0.0, 0.0],
+                    end: south,
+                    start_vertex: 11,
+                    end_vertex: 12,
+                    same_sense: false,
+                },
+            ),
+            (
+                3,
+                Edge {
+                    curve: meridian,
+                    start: south,
+                    end: [-r, 0.0, 0.0],
+                    start_vertex: 12,
+                    end_vertex: 10,
+                    same_sense: false,
+                },
+            ),
+        ];
+        let polys: HashMap<u64, Vec<[f64; 3]>> = edges
+            .iter()
+            .map(|(id, e)| (*id, discretize_edge(e, &o).unwrap()))
+            .collect();
+        for (same_sense, list) in [
+            (true, vec![(1, true), (2, true), (3, true)]),
+            (false, vec![(3, false), (2, false), (1, false)]),
+        ] {
+            let face = Face {
+                id: 1,
+                surface: s.clone(),
+                same_sense,
+                outer: Some(0),
+                loops: vec![(Loop::Edges(list), true)],
+            };
+            let fm = tessellate_face(&face, &polys, &o).unwrap();
+            let pt = |q: VRef| match q {
+                VRef::Edge { edge, i } => polys[&edge][i],
+                VRef::Inner(i) => fm.inner[i],
+            };
+            let area: f64 = fm
+                .tris
+                .iter()
+                .map(|t| {
+                    let [a, b, c] = t.map(pt);
+                    let (u, v) = (
+                        [b[0] - a[0], b[1] - a[1], b[2] - a[2]],
+                        [c[0] - a[0], c[1] - a[1], c[2] - a[2]],
+                    );
+                    0.5 * dist(
+                        [
+                            u[1] * v[2] - u[2] * v[1],
+                            u[2] * v[0] - u[0] * v[2],
+                            u[0] * v[1] - u[1] * v[0],
+                        ],
+                        [0.0; 3],
+                    )
+                })
+                .sum();
+            let quarter = PI * r * r;
+            assert!(
+                (area - quarter).abs() < 1e-3 * quarter,
+                "same_sense {same_sense}: area {area} vs {quarter}"
+            );
+            let _ = FRAC_PI_2;
+        }
+    }
+}

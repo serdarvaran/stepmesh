@@ -112,11 +112,18 @@ fn euclidean(c: [f64; 4]) -> [f64; 3] {
     [c[0] / c[3], c[1] / c[3], c[2] / c[3]]
 }
 
+/// Points this close (millimetres, plus a relative part) close a curve or surface on itself:
+/// files leave seams apart by their modelling tolerance.
+const CLOSING: f64 = 1e-5;
+
 fn same_point(a: [f64; 4], b: [f64; 4]) -> bool {
-    let (p, q) = (euclidean(a), euclidean(b));
+    near(euclidean(a), euclidean(b))
+}
+
+fn near(p: [f64; 3], q: [f64; 3]) -> bool {
     let d: f64 = (0..3).map(|i| (p[i] - q[i]).powi(2)).sum();
     let s: f64 = p.iter().map(|x| x * x).sum();
-    d <= 1e-20 * (1.0 + s)
+    d.sqrt() <= CLOSING + 1e-9 * s.sqrt()
 }
 
 /// End knots repeated `degree + 1` times: the curve starts and ends at its end control points.
@@ -158,9 +165,7 @@ impl Nurbs1 {
             return same_point(first, last);
         }
         let (t0, t1) = self.range();
-        let (a, b) = (self.at(t0).0, self.at(t1).0);
-        (0..3).map(|i| (a[i] - b[i]).powi(2)).sum::<f64>()
-            <= 1e-20 * (1.0 + a.iter().map(|x| x * x).sum::<f64>())
+        near(self.at(t0).0, self.at(t1).0)
     }
 
     /// Point and first derivative.
@@ -200,19 +205,32 @@ impl Nurbs2 {
     /// Whether the surface closes on itself along u (first and last rows of control points
     /// coincide on a clamped knot vector).
     pub fn closed_along_u(&self) -> bool {
-        clamped(&self.ku, self.du)
-            && self.ctrl[0]
+        if clamped(&self.ku, self.du) {
+            let last = &self.ctrl[self.ctrl.len() - 1];
+            return self.ctrl[0]
                 .iter()
-                .zip(&self.ctrl[self.ctrl.len() - 1])
-                .all(|(&a, &b)| same_point(a, b))
+                .zip(last)
+                .all(|(&a, &b)| same_point(a, b));
+        }
+        let [(u0, u1), (v0, v1)] = self.range();
+        (0..5).all(|i| {
+            let v = v0 + (v1 - v0) * i as f64 / 4.0;
+            near(self.at(u0, v).0, self.at(u1, v).0)
+        })
     }
 
     pub fn closed_along_v(&self) -> bool {
-        clamped(&self.kv, self.dv)
-            && self
+        if clamped(&self.kv, self.dv) {
+            return self
                 .ctrl
                 .iter()
-                .all(|row| same_point(row[0], row[row.len() - 1]))
+                .all(|row| same_point(row[0], row[row.len() - 1]));
+        }
+        let [(u0, u1), (v0, v1)] = self.range();
+        (0..5).all(|i| {
+            let u = u0 + (u1 - u0) * i as f64 / 4.0;
+            near(self.at(u, v0).0, self.at(u, v1).0)
+        })
     }
 
     /// Point and the partial derivatives along u and v; parameters outside the range of a closed
@@ -229,6 +247,10 @@ impl Nurbs2 {
         } else {
             v
         };
+        self.at(u, v)
+    }
+
+    fn at(&self, u: f64, v: f64) -> ([f64; 3], [f64; 3], [f64; 3]) {
         let (nu, nv) = (self.ctrl.len() - 1, self.ctrl[0].len() - 1);
         let su = find_span(nu, self.du, u, &self.ku);
         let sv = find_span(nv, self.dv, v, &self.kv);
