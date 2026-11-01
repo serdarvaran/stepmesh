@@ -5,6 +5,20 @@ use crate::Error;
 use crate::geom::{Curve, Nurbs1, Nurbs2, Surface, expand_knots};
 use crate::p21::{Record, Value};
 
+/// Records that give a B-spline curve its knots, explicitly or by form.
+const CURVE_FORMS: [&str; 4] = [
+    "B_SPLINE_CURVE_WITH_KNOTS",
+    "UNIFORM_CURVE",
+    "QUASI_UNIFORM_CURVE",
+    "BEZIER_CURVE",
+];
+const SURFACE_FORMS: [&str; 4] = [
+    "B_SPLINE_SURFACE_WITH_KNOTS",
+    "UNIFORM_SURFACE",
+    "QUASI_UNIFORM_SURFACE",
+    "BEZIER_SURFACE",
+];
+
 impl Decoder<'_> {
     fn unsupported<T>(&self, id: u64) -> Result<T, Error> {
         Err(Error::Unsupported {
@@ -41,7 +55,7 @@ impl Decoder<'_> {
         let e = self.entity(id)?;
         if e.records
             .iter()
-            .any(|r| r.name == "B_SPLINE_CURVE_WITH_KNOTS")
+            .any(|r| r.name == "B_SPLINE_CURVE" || CURVE_FORMS.contains(&r.name.as_str()))
         {
             return self.bspline_curve(id, units);
         }
@@ -72,28 +86,74 @@ impl Decoder<'_> {
         }
     }
 
+    /// The B-spline's base record, the record that gives its knots (one of `forms`), and the
+    /// index of the degree in the base record. A simple instance carries everything on one
+    /// record after the name; a complex one splits it by supertype.
     fn bspline_record(
         &self,
         id: u64,
-        simple: &str,
-        complex: &str,
+        base: &str,
+        forms: &[&str],
     ) -> Result<(&Record, &Record, usize), Error> {
-        // Simple instance: all attributes on one record after the name. Complex: split by supertype.
         let e = self.entity(id)?;
         if e.records.len() == 1 {
             return Ok((&e.records[0], &e.records[0], 1));
         }
-        let base = e
+        let b = e
             .records
             .iter()
-            .find(|r| r.name == simple)
-            .map_or_else(|| self.invalid(id, simple), Ok)?;
+            .find(|r| r.name == base)
+            .map_or_else(|| self.invalid(id, base), Ok)?;
         let knots = e
             .records
             .iter()
-            .find(|r| r.name == complex)
-            .map_or_else(|| self.invalid(id, complex), Ok)?;
-        Ok((base, knots, 0))
+            .find(|r| forms.contains(&r.name.as_str()))
+            .map_or_else(|| self.invalid(id, "B-spline without a knot form"), Ok)?;
+        Ok((b, knots, 0))
+    }
+
+    /// Knot vector of `n` control points of degree `p`: explicit (`*_WITH_KNOTS`, from the
+    /// multiplicities and values at `at` and `at + offset`) or implied by the form (ISO 10303-42).
+    fn knot_vector(
+        &self,
+        id: u64,
+        form: &Record,
+        at: usize,
+        offset: usize,
+        n: usize,
+        p: usize,
+    ) -> Result<Vec<f64>, Error> {
+        let kind = form.name.as_str();
+        if kind.ends_with("_WITH_KNOTS") {
+            let mults = self.integers(id, form.params.get(at))?;
+            let ks = self.reals(id, form.params.get(at + offset))?;
+            return Ok(expand_knots(&mults, &ks));
+        }
+        if n <= p {
+            return self.invalid(id, "fewer control points than the degree needs");
+        }
+        Ok(if kind.starts_with("UNIFORM") {
+            (0..n + p + 1).map(|i| i as f64 - p as f64).collect()
+        } else if kind.starts_with("QUASI_UNIFORM") {
+            let last = (n - p) as f64;
+            let mut k = vec![0.0; p + 1];
+            k.extend((1..n - p).map(|i| i as f64));
+            k.extend(std::iter::repeat_n(last, p + 1));
+            k
+        } else {
+            // BEZIER: piecewise Bézier segments of degree p
+            if (n - 1) % p != 0 {
+                return self.invalid(id, "control points do not form whole Bézier segments");
+            }
+            let segments = (n - 1) / p;
+            let mut mults = vec![p; segments + 1];
+            mults[0] = p + 1;
+            mults[segments] = p + 1;
+            expand_knots(
+                &mults,
+                &(0..=segments).map(|i| i as f64).collect::<Vec<_>>(),
+            )
+        })
     }
 
     fn weights(&self, id: u64, record: &str) -> Result<Option<&Value>, Error> {
@@ -106,18 +166,15 @@ impl Decoder<'_> {
     }
 
     fn bspline_curve(&self, id: u64, units: Units) -> Result<Curve, Error> {
-        let (base, knots, off) =
-            self.bspline_record(id, "B_SPLINE_CURVE", "B_SPLINE_CURVE_WITH_KNOTS")?;
+        let (base, form, off) = self.bspline_record(id, "B_SPLINE_CURVE", &CURVE_FORMS)?;
         let degree = self.integer(id, base.params.get(off))?;
         let pts = self.references(id, base.params.get(off + 1))?;
         let k0 = if off == 1 { 6 } else { 0 };
-        let mults = self.integers(id, knots.params.get(k0))?;
-        let ks = self.reals(id, knots.params.get(k0 + 1))?;
         let w = match self.weights(id, "RATIONAL_B_SPLINE_CURVE")? {
             Some(v) => self.reals(id, Some(v))?,
             None => vec![1.0; pts.len()],
         };
-        let knots = expand_knots(&mults, &ks);
+        let knots = self.knot_vector(id, form, k0, 1, pts.len(), degree)?;
         if degree == 0 || w.len() != pts.len() || knots.len() != pts.len() + degree + 1 {
             return self.invalid(id, "inconsistent B-spline curve");
         }
@@ -140,7 +197,7 @@ impl Decoder<'_> {
         let e = self.entity(id)?;
         if e.records
             .iter()
-            .any(|r| r.name == "B_SPLINE_SURFACE_WITH_KNOTS")
+            .any(|r| r.name == "B_SPLINE_SURFACE" || SURFACE_FORMS.contains(&r.name.as_str()))
         {
             return self.bspline_surface(id, units);
         }
@@ -191,8 +248,7 @@ impl Decoder<'_> {
     }
 
     fn bspline_surface(&self, id: u64, units: Units) -> Result<Surface, Error> {
-        let (base, knots, off) =
-            self.bspline_record(id, "B_SPLINE_SURFACE", "B_SPLINE_SURFACE_WITH_KNOTS")?;
+        let (base, form, off) = self.bspline_record(id, "B_SPLINE_SURFACE", &SURFACE_FORMS)?;
         let du = self.integer(id, base.params.get(off))?;
         let dv = self.integer(id, base.params.get(off + 1))?;
         let Some(Value::List(rows)) = base.params.get(off + 2) else {
@@ -201,14 +257,13 @@ impl Decoder<'_> {
         let closed_u = self.logical(base.params.get(off + 4));
         let closed_v = self.logical(base.params.get(off + 5));
         let k0 = if off == 1 { 8 } else { 0 };
-        let ku = expand_knots(
-            &self.integers(id, knots.params.get(k0))?,
-            &self.reals(id, knots.params.get(k0 + 2))?,
-        );
-        let kv = expand_knots(
-            &self.integers(id, knots.params.get(k0 + 1))?,
-            &self.reals(id, knots.params.get(k0 + 3))?,
-        );
+        let nu = rows.len();
+        let nv = match rows.first() {
+            Some(Value::List(r)) => r.len(),
+            _ => return self.invalid(id, "B-spline surface without control points"),
+        };
+        let ku = self.knot_vector(id, form, k0, 2, nu, du)?;
+        let kv = self.knot_vector(id, form, k0 + 1, 2, nv, dv)?;
         let weights: Option<Vec<Vec<f64>>> = match self.weights(id, "RATIONAL_B_SPLINE_SURFACE")? {
             Some(Value::List(ws)) => Some(
                 ws.iter()

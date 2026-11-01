@@ -61,21 +61,26 @@ pub fn tessellate_face(
         inner: Vec::new(),
     };
     let mut loops = Vec::new();
-    for (l, orientation) in &f.loops {
+    let edge_loops = f
+        .loops
+        .iter()
+        .filter(|(l, _)| matches!(l, Loop::Edges(_)))
+        .count();
+    for (index, (l, orientation)) in f.loops.iter().enumerate() {
         if let Loop::Edges(list) = l {
             let pts = loop_points(list, *orientation, edges)
                 .ok_or_else(|| Ctx::error(f.id, "a loop edge has no polyline"))?;
-            loops.push(c.map_loop(&pts)?);
+            let outer = match f.outer {
+                Some(o) => Some(o == index),
+                None => (edge_loops == 1).then_some(true),
+            };
+            loops.push(c.map_loop(&pts, outer)?);
         }
     }
     if loops.is_empty() {
         loops = c.full_domain()?;
-    } else if loops.iter().any(|l| c.wraps(l)) {
-        // A loop around a periodic surface without a seam edge: not handled yet.
-        return Err(Ctx::error(
-            f.id,
-            "a loop goes round a periodic surface without a seam",
-        ));
+    } else {
+        loops = c.close_wraps(loops)?;
     }
     c.align(&mut loops);
     c.triangulate(&loops)
@@ -128,8 +133,8 @@ impl Ctx<'_> {
     /// Parameters of a loop, continuous across periodic seams. A point where the surface
     /// collapses (pole, apex) is spread over the parameter range between its neighbours, in
     /// steps of at most the angular deflection, so the triangles around it form a fan.
-    fn map_loop(&self, pts: &[(VRef, P3)]) -> Result<Vec<BPoint>, Error> {
-        let mut uv: Vec<Option<(f64, f64)>> = vec![None; pts.len()];
+    fn map_loop(&self, pts: &[(VRef, P3)], outer: Option<bool>) -> Result<Vec<BPoint>, Error> {
+        let mut uv: Vec<(f64, f64)> = vec![(0.0, 0.0); pts.len()];
         let mut sing = vec![(false, false); pts.len()];
         let mut hint = None;
         for (i, &(_, p)) in pts.iter().enumerate() {
@@ -141,29 +146,76 @@ impl Ctx<'_> {
                 return Err(self.fail("a boundary point lies off the surface"));
             }
             sing[i] = self.singular(q);
-            uv[i] = Some(q);
+            uv[i] = q;
             if !sing[i].0 && !sing[i].1 {
                 hint = Some(q);
             }
         }
-        let n = pts.len();
-        let regular = |i: usize| !sing[i].0 && !sing[i].1;
-        if !(0..n).any(regular) {
+        if !sing.iter().any(|s| !s.0 && !s.1) {
             return Err(self.fail("the loop has no regular point"));
         }
+        let plain = self.spread(pts, &uv, &sing);
+        // After a pole the next meridian's angle is known only up to a period; when the loop does
+        // not close, or closes the wrong way round, try the other choices.
+        let Some(period) = self.s.period().0 else {
+            return Ok(plain);
+        };
+        let mut segment = vec![0usize; pts.len()];
+        let mut blocks = 0;
+        for i in 0..pts.len() {
+            if sing[i].0 && (i == 0 || !sing[i - 1].0) {
+                blocks += 1;
+            }
+            segment[i] = blocks;
+        }
+        if blocks == 0 || blocks > 4 {
+            return Ok(plain);
+        }
+        let want = outer.map(|o| if o == self.f.same_sense { 1.0 } else { -1.0 });
+        let fits = |l: &[BPoint]| {
+            self.advance(l) == (0.0, 0.0) && want.is_none_or(|w| w * signed_area(l) > 0.0)
+        };
+        if fits(&plain) {
+            return Ok(plain);
+        }
+        let mut best: Option<(usize, Vec<BPoint>)> = None;
+        for combo in 0..3usize.pow(blocks as u32) {
+            let ks: Vec<i32> = (0..blocks)
+                .map(|b| (combo / 3usize.pow(b as u32) % 3) as i32 - 1)
+                .collect();
+            let shifted: Vec<(f64, f64)> = (0..pts.len())
+                .map(|i| {
+                    let k: i32 = ks[..segment[i]].iter().sum();
+                    (uv[i].0 + k as f64 * period, uv[i].1)
+                })
+                .collect();
+            let l = self.spread(pts, &shifted, &sing);
+            let cost = ks.iter().map(|k| k.unsigned_abs() as usize).sum();
+            if fits(&l) && best.as_ref().is_none_or(|(c, _)| cost < *c) {
+                best = Some((cost, l));
+            }
+        }
+        Ok(best.map_or(plain, |(_, l)| l))
+    }
+
+    /// The loop's points in parameter space; a point where the surface collapses is spread over
+    /// the row between its neighbours.
+    fn spread(&self, pts: &[(VRef, P3)], uv: &[(f64, f64)], sing: &[(bool, bool)]) -> Vec<BPoint> {
+        let n = pts.len();
+        let regular = |i: usize| !sing[i].0 && !sing[i].1;
         let neighbour = |i: usize, step: isize| {
             let mut j = i;
             loop {
                 j = (j as isize + step).rem_euclid(n as isize) as usize;
                 if regular(j) {
-                    return uv[j].unwrap_or((0.0, 0.0));
+                    return uv[j];
                 }
             }
         };
         let mut out = Vec::with_capacity(n + 2);
         for i in 0..n {
             let (r, p) = pts[i];
-            let q = uv[i].unwrap_or((0.0, 0.0));
+            let q = uv[i];
             if regular(i) {
                 out.push(BPoint {
                     uv: q,
@@ -189,17 +241,164 @@ impl Ctx<'_> {
                 });
             }
         }
-        Ok(out)
+        out
     }
 
-    /// Whether a mapped loop ends a period away from where it starts.
-    fn wraps(&self, l: &[BPoint]) -> bool {
+    /// How far a mapped loop advances along a periodic direction: a whole period (signed) when
+    /// it goes round the surface without crossing a seam, `(0, 0)` otherwise.
+    fn advance(&self, l: &[BPoint]) -> (f64, f64) {
         let (Some(first), Some(last)) = (l.first(), l.last()) else {
-            return false;
+            return (0.0, 0.0);
         };
         let (pu, pv) = self.s.period();
-        let gap = |a: f64, b: f64, p: Option<f64>| p.is_some_and(|p| (a - b).abs() > 0.5 * p);
-        gap(first.uv.0, last.uv.0, pu) || gap(first.uv.1, last.uv.1, pv)
+        let gap = |a: f64, b: f64, p: Option<f64>| match p {
+            Some(p) if (b - a).abs() > 0.5 * p => ((b - a) / p).round() * p,
+            _ => 0.0,
+        };
+        (
+            gap(first.uv.0, last.uv.0, pu),
+            gap(first.uv.1, last.uv.1, pv),
+        )
+    }
+
+    /// Loops that go round a periodic surface without a seam edge become one parameter polygon:
+    /// a single one is closed through the pole on the side the face lies (spherical cap), two
+    /// running opposite ways are joined into a band (cylinder without a seam).
+    fn close_wraps(&mut self, loops: Vec<Vec<BPoint>>) -> Result<Vec<Vec<BPoint>>, Error> {
+        let mut plain = Vec::new();
+        let mut wrapping = Vec::new();
+        for l in loops {
+            match self.advance(&l) {
+                (0.0, 0.0) => plain.push(l),
+                (du, 0.0) => wrapping.push((l, du)),
+                _ => return Err(self.fail("a loop goes round the surface along v")),
+            }
+        }
+        match wrapping.len() {
+            0 => {}
+            1 => {
+                let (l, du) = wrapping.pop().ok_or_else(|| self.fail("no loop"))?;
+                plain.push(self.close_at_pole(l, du)?);
+            }
+            2 => {
+                let (b, db) = wrapping.pop().ok_or_else(|| self.fail("no loop"))?;
+                let (a, da) = wrapping.pop().ok_or_else(|| self.fail("no loop"))?;
+                if da.signum() == db.signum() {
+                    return Err(self.fail("two loops go round the surface the same way"));
+                }
+                plain.push(self.join_band(a, da, b, db));
+            }
+            _ => return Err(self.fail("more than two loops go round the surface")),
+        }
+        Ok(plain)
+    }
+
+    /// The loop, then its first point a period on, then the pole back to the start. The face
+    /// lies left of the loop in parameter space (right when it runs against its surface), which
+    /// picks the pole.
+    fn close_at_pole(&mut self, mut l: Vec<BPoint>, du: f64) -> Result<Vec<BPoint>, Error> {
+        let [_, (v0, v1)] = self.s.param_bounds();
+        let north = (du > 0.0) == self.f.same_sense;
+        let v = if north { v1 } else { v0 };
+        let first = l[0];
+        if !v.is_finite() || !self.singular((first.uv.0, v)).0 {
+            return Err(self.fail("a loop goes round the surface and no pole closes it"));
+        }
+        let end = first.uv.0 + du;
+        let pole_p = self.s.point(first.uv.0, v);
+        let pole_r = self.new_inner(pole_p);
+        // The meridian from the loop to the pole is a seam inside the face: sampled once, its
+        // points stand on both sides.
+        let seam = self.seam_points(first.uv, (first.uv.0, v));
+        l.push(BPoint {
+            uv: (end, first.uv.1),
+            ..first
+        });
+        l.extend(seam.iter().map(|b| BPoint {
+            uv: (b.uv.0 + du, b.uv.1),
+            ..*b
+        }));
+        let steps = (du.abs() / self.o.angular_deflection.min(0.5))
+            .ceil()
+            .max(1.0) as usize;
+        for k in 0..=steps {
+            let u = end - du * k as f64 / steps as f64;
+            l.push(BPoint {
+                uv: (u, v),
+                p: pole_p,
+                r: pole_r,
+                pole: true,
+            });
+        }
+        l.extend(seam.iter().rev().copied());
+        Ok(l)
+    }
+
+    /// Two loops going round a periodic surface in opposite directions, joined at their nearest
+    /// points into one polygon: all of `a`, its first point a period on, a seam to `b`, `b` from
+    /// there round to the same point a period back, and the seam back. Both copies of the seam
+    /// share their points.
+    fn join_band(&mut self, a: Vec<BPoint>, da: f64, b: Vec<BPoint>, db: f64) -> Vec<BPoint> {
+        let period = da.abs();
+        let target = a[0].uv.0 + da;
+        let gap = |x: f64| {
+            (x - target)
+                .rem_euclid(period)
+                .min((target - x).rem_euclid(period))
+        };
+        let k = (0..b.len())
+            .min_by(|&i, &j| gap(b[i].uv.0).total_cmp(&gap(b[j].uv.0)))
+            .unwrap_or(0);
+        let shift = ((target - b[k].uv.0) / period).round() * period;
+        let bk = (b[k].uv.0 + shift, b[k].uv.1);
+        let seam = self.seam_points(a[0].uv, (bk.0 - da, bk.1));
+        let mut out = a.clone();
+        out.push(BPoint {
+            uv: (a[0].uv.0 + da, a[0].uv.1),
+            ..a[0]
+        });
+        out.extend(seam.iter().map(|s| BPoint {
+            uv: (s.uv.0 + da, s.uv.1),
+            ..*s
+        }));
+        for i in 0..=b.len() {
+            let j = (k + i) % b.len();
+            // Points after the end of `b` continue past its wrap.
+            let extra = if k + i >= b.len() { db } else { 0.0 };
+            out.push(BPoint {
+                uv: (b[j].uv.0 + shift + extra, b[j].uv.1),
+                ..b[j]
+            });
+        }
+        out.extend(seam.iter().rev().copied());
+        out
+    }
+
+    /// Points strictly between two parameter points, along the straight line joining them, at
+    /// the edge tolerances (new face vertices).
+    fn seam_points(&mut self, from: (f64, f64), to: (f64, f64)) -> Vec<BPoint> {
+        let s = self.s.clone();
+        let at = |t: f64| (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t);
+        let curve = |t: f64| {
+            let (u, v) = at(t);
+            let (p, su, sv) = s.derivs(u, v);
+            (p, add(mul(su, to.0 - from.0), mul(sv, to.1 - from.1)))
+        };
+        let ts = sample_curve(&curve, 0.0, 1.0, self.o);
+        ts[1..ts.len() - 1]
+            .iter()
+            .map(|&t| {
+                let uv = at(t);
+                let p = self.s.point(uv.0, uv.1);
+                let r = self.new_inner(p);
+                BPoint {
+                    uv,
+                    p,
+                    r,
+                    pole: false,
+                }
+            })
+            .collect()
     }
 
     /// Shifts every loop by whole periods next to the one with the widest parameter range.
@@ -539,4 +738,16 @@ fn classify(cdt: &ConstrainedDelaunayTriangulation<Point2<f64>>) -> HashSet<usiz
         .filter(|&(_, odd)| odd)
         .map(|(i, _)| i)
         .collect()
+}
+
+/// Shoelace area of a loop in parameter space, positive when counter-clockwise.
+fn signed_area(l: &[BPoint]) -> f64 {
+    let n = l.len();
+    (0..n)
+        .map(|i| {
+            let (a, b) = (l[i].uv, l[(i + 1) % n].uv);
+            a.0 * b.1 - b.0 * a.1
+        })
+        .sum::<f64>()
+        / 2.0
 }

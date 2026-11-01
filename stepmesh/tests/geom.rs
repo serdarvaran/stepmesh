@@ -528,3 +528,59 @@ fn projection_near_a_collapsed_side() {
         }
     }
 }
+
+const IMPLICIT_KNOTS: &str = "ISO-10303-21;HEADER;FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));ENDSEC;DATA;
+#1=CARTESIAN_POINT('',(0.,0.,0.));#2=CARTESIAN_POINT('',(1.,2.,0.));#3=CARTESIAN_POINT('',(3.,2.,0.));
+#4=CARTESIAN_POINT('',(4.,0.,0.));#5=CARTESIAN_POINT('',(6.,1.,0.));
+#10=QUASI_UNIFORM_CURVE('',2,(#1,#2,#3,#4,#5),.UNSPECIFIED.,.F.,.F.);
+#11=B_SPLINE_CURVE_WITH_KNOTS('',2,(#1,#2,#3,#4,#5),.UNSPECIFIED.,.F.,.F.,(3,1,1,3),(0.,1.,2.,3.),.QUASI_UNIFORM_KNOTS.);
+#12=(BOUNDED_CURVE()B_SPLINE_CURVE(2,(#1,#2,#3,#4,#5),.UNSPECIFIED.,.F.,.F.)CURVE()GEOMETRIC_REPRESENTATION_ITEM()
+QUASI_UNIFORM_CURVE()RATIONAL_B_SPLINE_CURVE((1.,1.,1.,1.,1.))REPRESENTATION_ITEM(''));
+#13=BEZIER_CURVE('',2,(#1,#2,#3,#4,#5),.UNSPECIFIED.,.F.,.F.);
+#14=B_SPLINE_CURVE_WITH_KNOTS('',2,(#1,#2,#3,#4,#5),.UNSPECIFIED.,.F.,.F.,(3,2,3),(0.,1.,2.),.PIECEWISE_BEZIER_KNOTS.);
+#15=UNIFORM_CURVE('',2,(#1,#2,#3,#4,#5),.UNSPECIFIED.,.F.,.F.);
+#16=B_SPLINE_CURVE_WITH_KNOTS('',2,(#1,#2,#3,#4,#5),.UNSPECIFIED.,.F.,.F.,(1,1,1,1,1,1,1,1),(-2.,-1.,0.,1.,2.,3.,4.,5.),.UNIFORM_KNOTS.);
+ENDSEC;END-ISO-10303-21;";
+
+#[test]
+fn implicit_knot_curves_match_explicit_ones() {
+    let x = parse(IMPLICIT_KNOTS.as_bytes()).unwrap();
+    let mm = Units {
+        length_mm: 1.0,
+        angle_rad: 1.0,
+    };
+    for (implicit, explicit) in [(10, 11), (12, 11), (13, 14), (15, 16)] {
+        let a = decode_curve(&x, implicit, mm).unwrap_or_else(|e| panic!("#{implicit}: {e}"));
+        let b = decode_curve(&x, explicit, mm).unwrap();
+        assert_eq!(a.param_range(), b.param_range(), "#{implicit}");
+        let (t0, t1) = b.param_range();
+        for i in 0..=20 {
+            let t = t0 + (t1 - t0) * i as f64 / 20.0;
+            assert!(dist(a.point(t), b.point(t)) < 1e-12, "#{implicit} at {t}");
+        }
+    }
+}
+
+const IMPLICIT_KNOT_SURFACE: &str = "ISO-10303-21;HEADER;FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));ENDSEC;DATA;
+#1=CARTESIAN_POINT('',(0.,0.,0.));#2=CARTESIAN_POINT('',(1.,0.,1.));#3=CARTESIAN_POINT('',(2.,0.,0.));
+#4=CARTESIAN_POINT('',(0.,1.,1.));#5=CARTESIAN_POINT('',(1.,1.,2.));#6=CARTESIAN_POINT('',(2.,1.,1.));
+#10=BEZIER_SURFACE('',1,2,((#1,#2,#3),(#4,#5,#6)),.UNSPECIFIED.,.F.,.F.,.F.);
+#11=B_SPLINE_SURFACE_WITH_KNOTS('',1,2,((#1,#2,#3),(#4,#5,#6)),.UNSPECIFIED.,.F.,.F.,.F.,(2,2),(3,3),(0.,1.),(0.,1.),.PIECEWISE_BEZIER_KNOTS.);
+ENDSEC;END-ISO-10303-21;";
+
+#[test]
+fn implicit_knot_surface_matches_explicit_one() {
+    let x = parse(IMPLICIT_KNOT_SURFACE.as_bytes()).unwrap();
+    let mm = Units {
+        length_mm: 1.0,
+        angle_rad: 1.0,
+    };
+    let a = decode_surface(&x, 10, mm).unwrap();
+    let b = decode_surface(&x, 11, mm).unwrap();
+    for i in 0..=10 {
+        for j in 0..=10 {
+            let (u, v) = (i as f64 / 10.0, j as f64 / 10.0);
+            assert!(dist(a.point(u, v), b.point(u, v)) < 1e-12);
+        }
+    }
+}
