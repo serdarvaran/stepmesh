@@ -562,6 +562,46 @@ mod seamless {
     }
 
     #[test]
+    fn sphere_with_a_hole_off_its_poles() {
+        // A circle round the +x axis, 30° from it: the loop does not go round the sphere, so
+        // the face is either the cap inside it or the rest of the sphere outside it.
+        let (r, half) = (10.0, PI / 6.0);
+        let circle =
+            Frame::new([r * half.cos(), 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]).unwrap();
+        let rho = r * half.sin();
+        let start = circle.to_world([rho, 0.0, 0.0]);
+        let e = Edge {
+            curve: Curve::Circle {
+                frame: circle,
+                r: rho,
+            },
+            start,
+            end: start,
+            start_vertex: 1,
+            end_vertex: 1,
+            same_sense: true,
+        };
+        let polys = HashMap::from([(1u64, discretize_edge(&e, &Options::default()).unwrap())]);
+        let cap = TAU * r * r * (1.0 - half.cos());
+        // Counter-clockwise seen from outside (+x): the cap lies on its left.
+        for (ccw, want) in [(true, cap), (false, 4.0 * PI * r * r - cap)] {
+            let face = Face {
+                id: 1,
+                surface: Surface::Sphere { frame: frame(), r },
+                same_sense: true,
+                outer: Some(0),
+                loops: vec![(Loop::Edges(vec![(1, true)]), ccw)],
+            };
+            let fm = tessellate_face(&face, &polys, &Options::default()).unwrap();
+            let got = area(&fm, &polys);
+            assert!(
+                (got - want).abs() < 1e-3 * want,
+                "ccw {ccw}: {got} vs {want}"
+            );
+        }
+    }
+
+    #[test]
     fn torus_band_lies_on_the_side_its_loops_give() {
         // Between the outer equator (v = 0) and the top circle (v = π/2) a torus has two bands:
         // the quarter and the other three quarters. The loops' direction picks one.

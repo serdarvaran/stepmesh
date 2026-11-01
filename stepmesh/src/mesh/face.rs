@@ -83,9 +83,23 @@ pub fn tessellate_face(
         }
     }
     if loops.is_empty() {
-        loops = c.full_domain()?;
+        loops = c.full_domain((0.0, 0.0))?;
     } else {
         loops = c.close_wraps(loops)?;
+        // A face can lie outside all its loops on a closed surface (a sphere with holes): the
+        // whole parameter domain is then its outer boundary.
+        let side = if f.same_sense { 1.0 } else { -1.0 };
+        let (pu, pv) = c.s.period();
+        if let Some(pu) = pu {
+            if loops.iter().all(|l| side * signed_area(l) < 0.0) {
+                // Its seams go where no loop reaches, so that the loops lie inside it.
+                let start = (
+                    free_param(&loops, 0, pu),
+                    pv.map_or(0.0, |p| free_param(&loops, 1, p)),
+                );
+                loops.extend(c.full_domain(start)?);
+            }
+        }
     }
     c.align(&mut loops);
     c.triangulate(&loops)
@@ -501,15 +515,16 @@ impl Ctx<'_> {
     /// Boundary of a face that covers its whole closed surface (a sphere bounded only by a
     /// vertex loop): the parameter rectangle, with opposite periodic sides sharing their points
     /// and collapsed sides reduced to one point.
-    fn full_domain(&mut self) -> Result<Vec<Vec<BPoint>>, Error> {
+    /// `start` holds the parameters of its seams (v only on a surface closed along v).
+    fn full_domain(&mut self, start: (f64, f64)) -> Result<Vec<Vec<BPoint>>, Error> {
         let (pu, pv) = self.s.period();
         let [(_, _), (vb0, vb1)] = self.s.param_bounds();
         let Some(pu) = pu else {
             return Err(self.fail("the surface is closed but not periodic"));
         };
-        let (u0, u1) = (0.0, pu);
+        let (u0, u1) = (start.0, start.0 + pu);
         let (v0, v1) = match pv {
-            Some(p) => (0.0, p),
+            Some(p) => (start.1, start.1 + p),
             None if vb0.is_finite() && vb1.is_finite() => (vb0, vb1),
             None => return Err(self.fail("the surface has no finite parameter range")),
         };
@@ -781,6 +796,39 @@ struct Checked {
     triangles: FxSet<[u32; 3]>,
     edges: FxSet<[u32; 2]>,
     normals: Vec<Option<P3>>,
+}
+
+/// A parameter along `axis` (0: u, 1: v), of period `p`, that no loop reaches: the middle of
+/// the widest gap between the loops' ranges.
+fn free_param(loops: &[Vec<BPoint>], axis: usize, p: f64) -> f64 {
+    let at = |b: &BPoint| if axis == 0 { b.uv.0 } else { b.uv.1 };
+    let mut spans: Vec<(f64, f64)> = loops
+        .iter()
+        .map(|l| {
+            let (lo, hi) = l
+                .iter()
+                .map(at)
+                .fold((f64::MAX, f64::MIN), |(a, b), x| (a.min(x), b.max(x)));
+            let s = lo.rem_euclid(p);
+            (s, s + hi - lo)
+        })
+        .collect();
+    spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let Some(&(first, mut reach)) = spans.first() else {
+        return 0.0;
+    };
+    let (mut widest, mut middle) = (f64::MIN, first);
+    for &(s, e) in &spans[1..] {
+        if s - reach > widest {
+            (widest, middle) = (s - reach, 0.5 * (s + reach));
+        }
+        reach = reach.max(e);
+    }
+    // The gap from the last loop round to the first.
+    if first + p - reach > widest {
+        middle = 0.5 * (reach + first + p);
+    }
+    middle
 }
 
 /// Inner faces inside the boundary: an odd number of constraint edges away from the outside.
