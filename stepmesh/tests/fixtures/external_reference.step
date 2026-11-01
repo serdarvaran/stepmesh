@@ -1,0 +1,18 @@
+ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION((''),'2;1');
+FILE_NAME('fixture','2026-01-01T00:00:00',(''),(''),'','','');
+FILE_SCHEMA(('AUTOMOTIVE_DESIGN { 1 0 10303 214 1 1 1 1 }'));
+ENDSEC;
+DATA;
+#1=APPLICATION_CONTEXT('automotive design');
+#2=PRODUCT_CONTEXT('',#1,'mechanical');
+#3=PRODUCT('part','part','',(#2));
+#4=PRODUCT_DEFINITION_FORMATION('','',#3);
+#5=PRODUCT_DEFINITION_CONTEXT('part definition',#1,'design');
+#6=PRODUCT_DEFINITION('design','',#4,#5);
+#7=DOCUMENT_TYPE('');
+#8=DOCUMENT_FILE('part.stp','','',#7,'',$);
+#9=APPLIED_DOCUMENT_REFERENCE(#8,'',(#6));
+ENDSEC;
+END-ISO-10303-21;

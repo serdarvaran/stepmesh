@@ -1,0 +1,80 @@
+{
+  "assembly_two_boxes.step": {
+    "area": 4400.0,
+    "solids": 2,
+    "volume": 12000.0
+  },
+  "box.step": {
+    "area": 2200.0,
+    "solids": 1,
+    "volume": 6000.0
+  },
+  "box_inch.step": {
+    "area": 3870.96,
+    "solids": 1,
+    "volume": 16387.064
+  },
+  "box_with_hole.step": {
+    "area": 1717.809724509617,
+    "solids": 1,
+    "volume": 3803.6504591506373
+  },
+  "cone.step": {
+    "area": 254.160184615763,
+    "solids": 1,
+    "volume": 261.7993877991494
+  },
+  "cylinder.step": {
+    "area": 471.238898038469,
+    "solids": 1,
+    "volume": 785.3981633974482
+  },
+  "cylinder_hole_seam.step": {
+    "area": 2108.4923509079213,
+    "solids": 1,
+    "volume": 6033.126739553958
+  },
+  "external_reference.step": {
+    "error": "NoGeometry"
+  },
+  "extrude_spline.step": {
+    "area": 443.5887699318039,
+    "solids": 1,
+    "volume": 604.6471673188037
+  },
+  "fillet_box.step": {
+    "area": 2080.778684233859,
+    "solids": 1,
+    "volume": 7572.619358586172
+  },
+  "loft.step": {
+    "area": 474.8870271393344,
+    "solids": 1,
+    "volume": 740.9692925044892
+  },
+  "mixed_units.step": {
+    "area": 3870.96,
+    "solids": 1,
+    "volume": 16387.064
+  },
+  "revolve_spline.step": {
+    "area": 454.84537844736,
+    "solids": 1,
+    "volume": 813.2015321457843
+  },
+  "shelled_box.step": {
+    "area": 2999.9999999999995,
+    "solids": 1,
+    "volume": 6999.999999999996
+  },
+  "sphere.step": {
+    "area": 615.7521601035994,
+    "solids": 1,
+    "volume": 1436.755040241732
+  },
+  "torus.step": {
+    "area": 1184.352528130723,
+    "solids": 1,
+    "volume": 1776.5287921960844
+  }
+}

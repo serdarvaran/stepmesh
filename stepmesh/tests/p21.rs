@@ -140,3 +140,16 @@ fn every_prefix_is_rejected_or_parsed() {
     }
     assert!(parse(text.as_bytes()).is_ok());
 }
+
+#[test]
+fn every_prefix_of_a_fixture_is_rejected_or_parsed() {
+    let text = std::fs::read(format!(
+        "{}/tests/fixtures/box.step",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap();
+    for n in 0..=text.len() {
+        let _ = parse(&text[..n]);
+    }
+    assert!(parse(&text).is_ok());
+}
