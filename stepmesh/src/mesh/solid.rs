@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use super::edges::discretize_edge;
 use super::face::{VRef, tessellate_face};
 use crate::fxhash::FxMap;
-use crate::model::{Brep, P3, cross, dot};
+use crate::model::{Brep, P3, cross, dot, norm, sub};
 use crate::{Error, Options};
 
 /// Vertex identity across the faces of a solid: edge end points are the B-rep's vertices.
@@ -34,6 +34,8 @@ pub fn mesh_brep(
     for (&id, e) in &b.edges {
         polys.insert(id, discretize_edge(e, o)?);
     }
+    let joined = joined_vertices(b);
+    let vertex = |v: u64| joined.get(&v).copied().unwrap_or(v);
     let mut index: FxMap<Key, u32> = FxMap::default();
     let mut positions: Vec<P3> = Vec::new();
     let mut triangles = Vec::new();
@@ -48,8 +50,8 @@ pub fn mesh_brep(
                         let e = &b.edges[&edge];
                         let last = polys[&edge].len() - 1;
                         let key = match i {
-                            0 => Key::Vertex(e.start_vertex),
-                            i if i == last => Key::Vertex(e.end_vertex),
+                            0 => Key::Vertex(vertex(e.start_vertex)),
+                            i if i == last => Key::Vertex(vertex(e.end_vertex)),
                             i => Key::EdgeSample(edge, i),
                         };
                         (key, polys[&edge][i])
@@ -88,6 +90,29 @@ pub fn mesh_brep(
         positions,
         triangles,
     })
+}
+
+/// Vertices joined by a zero-length edge (a sliver face's), each mapped to the smallest id of
+/// its group: they are one point, so one mesh vertex.
+fn joined_vertices(b: &Brep) -> HashMap<u64, u64> {
+    let mut parent: HashMap<u64, u64> = HashMap::new();
+    let root = |parent: &HashMap<u64, u64>, mut v: u64| {
+        while let Some(&p) = parent.get(&v) {
+            v = p;
+        }
+        v
+    };
+    for e in b.edges.values() {
+        let zero = norm(sub(e.start, e.end)) <= 1e-9 * (1.0 + norm(e.start));
+        if zero && e.start_vertex != e.end_vertex {
+            let (x, y) = (root(&parent, e.start_vertex), root(&parent, e.end_vertex));
+            if x != y {
+                parent.insert(x.max(y), x.min(y));
+            }
+        }
+    }
+    let ids: Vec<u64> = parent.keys().copied().collect();
+    ids.into_iter().map(|v| (v, root(&parent, v))).collect()
 }
 
 pub(crate) fn triangle_area(a: P3, b: P3, c: P3) -> f64 {

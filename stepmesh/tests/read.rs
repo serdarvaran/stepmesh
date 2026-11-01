@@ -119,6 +119,37 @@ fn reversed_edge_curve_is_shared() {
 }
 
 #[test]
+fn zero_length_edge_joins_its_vertices() {
+    // Face #17 reaches the corner of vertex #22 through a second vertex at the same point; a
+    // sliver face holds the zero-length edge between the two, as some exporters write it.
+    let text = fixture("box.step");
+    let face_loop = "#19 = EDGE_LOOP('',(#20,#55,#83,#111));";
+    let shell = "#16 = CLOSED_SHELL('',(#17,";
+    assert!(text.contains(face_loop) && text.contains(shell));
+    let text = text
+        .replacen(face_loop, "#19 = EDGE_LOOP('',(#9020,#9022,#83,#111));", 1)
+        .replacen(shell, "#16 = CLOSED_SHELL('',(#9030,#17,", 1)
+        .replacen(
+            "ENDSEC;\nEND-ISO",
+            "#9010 = VERTEX_POINT('',#9014);\n\
+             #9014 = CARTESIAN_POINT('',(-5.,-10.,-15.));\n\
+             #9011 = EDGE_CURVE('',#9010,#24,#26,.T.);\n\
+             #9012 = EDGE_CURVE('',#9010,#22,#26,.T.);\n\
+             #9013 = EDGE_CURVE('',#9010,#57,#59,.T.);\n\
+             #9020 = ORIENTED_EDGE('',*,*,#9011,.F.);\n\
+             #9021 = ORIENTED_EDGE('',*,*,#9012,.T.);\n\
+             #9022 = ORIENTED_EDGE('',*,*,#9013,.T.);\n\
+             #9023 = ORIENTED_EDGE('',*,*,#9012,.F.);\n\
+             #9030 = ADVANCED_FACE('',(#9031),#32,.F.);\n\
+             #9031 = FACE_OUTER_BOUND('',#9032,.T.);\n\
+             #9032 = EDGE_LOOP('',(#9021,#9023));\nENDSEC;\nEND-ISO",
+            1,
+        );
+    let m = read(&text).unwrap();
+    assert!((volume(&m) - 6000.0).abs() < 1e-9, "{}", volume(&m));
+}
+
+#[test]
 fn missing_face_is_not_watertight() {
     let text = fixture("box.step");
     let shell = text.lines().find(|l| l.contains("CLOSED_SHELL(")).unwrap();
