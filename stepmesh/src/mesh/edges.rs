@@ -31,7 +31,7 @@ pub fn discretize_edge(e: &Edge, o: &Options) -> Result<Vec<P3>, Error> {
             cuts.push(t_end);
             let mut ts = vec![t_start];
             for w in cuts.windows(2) {
-                adaptive(&e.curve, w[0], w[1], o, 0, &mut ts);
+                adaptive(&|t| e.curve.derivs(t), w[0], w[1], o, 0, &mut ts);
             }
             ts
         }
@@ -90,15 +90,29 @@ fn uniform(t0: f64, t1: f64, r: f64, o: &Options) -> Vec<f64> {
         .collect()
 }
 
+/// Parameters from `a` to `b` (both included) of a curve given by point and derivative.
+pub(crate) fn sample_curve(c: &dyn Fn(f64) -> (P3, P3), a: f64, b: f64, o: &Options) -> Vec<f64> {
+    let mut out = vec![a];
+    adaptive(c, a, b, o, 0, &mut out);
+    out
+}
+
 /// Appends the parameters after `a` up to and including `b`, bisecting where the curve leaves
 /// the chord by more than the deflection or turns by more than the angle.
-fn adaptive(c: &Curve, a: f64, b: f64, o: &Options, depth: usize, out: &mut Vec<f64>) {
-    let (pa, da) = c.derivs(a);
-    let (pb, db) = c.derivs(b);
+fn adaptive(
+    c: &dyn Fn(f64) -> (P3, P3),
+    a: f64,
+    b: f64,
+    o: &Options,
+    depth: usize,
+    out: &mut Vec<f64>,
+) {
+    let (pa, da) = c(a);
+    let (pb, db) = c(b);
     let chord = sub(pb, pa);
     let len2 = dot(chord, chord);
     let off_chord = |t: f64| {
-        let q = sub(c.point(t), pa);
+        let q = sub(c(t).0, pa);
         let along = if len2 > 0.0 {
             dot(q, chord) / len2
         } else {

@@ -195,3 +195,222 @@ fn fixture_edges_discretize() {
         }
     }
 }
+
+mod faces {
+    use super::*;
+    use std::collections::HashMap;
+    use stepmesh::internals::{
+        Brep, FaceMesh, Surface, VRef, decode_brep, decode_model, tessellate_face,
+    };
+
+    struct Meshed {
+        brep: Brep,
+        faces: Vec<(usize, usize, FaceMesh)>,
+        polys: HashMap<u64, Vec<[f64; 3]>>,
+    }
+
+    fn fixture_area(name: &str) -> f64 {
+        let text = std::fs::read_to_string(format!(
+            "{}/tests/fixtures/fixtures.json",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+        let start = text.find(&format!("\"{name}\"")).unwrap();
+        let area = &text[start..][text[start..].find("\"area\": ").unwrap() + 8..];
+        area[..area.find(',').unwrap()].trim().parse().unwrap()
+    }
+
+    fn mesh(name: &str) -> Vec<Meshed> {
+        let x = stepmesh::p21::parse(
+            &std::fs::read(format!(
+                "{}/tests/fixtures/{name}",
+                env!("CARGO_MANIFEST_DIR")
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        let m = decode_model(&x).unwrap();
+        let o = Options::default();
+        m.parts
+            .iter()
+            .flat_map(|p| &p.breps)
+            .map(|&(id, units)| {
+                let brep = decode_brep(&x, id, units).unwrap();
+                let polys: HashMap<u64, Vec<[f64; 3]>> = brep
+                    .edges
+                    .iter()
+                    .map(|(&k, e)| (k, discretize_edge(e, &o).unwrap()))
+                    .collect();
+                let mut faces = Vec::new();
+                for (si, s) in brep.shells.iter().enumerate() {
+                    for (fi, f) in s.faces.iter().enumerate() {
+                        let fm = tessellate_face(f, &polys, &o)
+                            .unwrap_or_else(|e| panic!("{name} face #{}: {e}", f.id));
+                        faces.push((si, fi, fm));
+                    }
+                }
+                Meshed { brep, faces, polys }
+            })
+            .collect()
+    }
+
+    fn point(m: &Meshed, fm: &FaceMesh, r: VRef) -> [f64; 3] {
+        match r {
+            VRef::Edge { edge, i } => m.polys[&edge][i],
+            VRef::Inner(i) => fm.inner[i],
+        }
+    }
+
+    fn tri_area(a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> f64 {
+        let (u, v) = (
+            [b[0] - a[0], b[1] - a[1], b[2] - a[2]],
+            [c[0] - a[0], c[1] - a[1], c[2] - a[2]],
+        );
+        let n = [
+            u[1] * v[2] - u[2] * v[1],
+            u[2] * v[0] - u[0] * v[2],
+            u[0] * v[1] - u[1] * v[0],
+        ];
+        0.5 * dist(n, [0.0; 3])
+    }
+
+    fn total_area(ms: &[Meshed]) -> f64 {
+        ms.iter()
+            .flat_map(|m| m.faces.iter().map(move |(_, _, fm)| (m, fm)))
+            .flat_map(|(m, fm)| {
+                fm.tris.iter().map(move |t| {
+                    tri_area(point(m, fm, t[0]), point(m, fm, t[1]), point(m, fm, t[2]))
+                })
+            })
+            .sum()
+    }
+
+    fn assert_area(name: &str, rel: f64) {
+        let (got, want) = (total_area(&mesh(name)), fixture_area(name));
+        assert!(
+            (got - want).abs() <= rel * want,
+            "{name}: area {got} vs {want}"
+        );
+    }
+
+    #[test]
+    fn planar_face_with_hole_area_exact() {
+        // The planar faces are triangulated from their boundary polylines alone, so their area is
+        // that of the polygons; with the cylindrical hole wall the total is within deflection.
+        assert_area("box_with_hole.step", 1e-4);
+        assert_area("box.step", 1e-12);
+    }
+
+    #[test]
+    fn cylinder_lateral_area_within_deflection() {
+        assert_area("cylinder.step", 1e-3);
+    }
+
+    #[test]
+    fn cylinder_with_hole_across_seam() {
+        assert_area("cylinder_hole_seam.step", 1e-3);
+        assert_oriented("cylinder_hole_seam.step");
+    }
+
+    #[test]
+    fn full_sphere() {
+        assert_area("sphere.step", 1e-3);
+        assert_oriented("sphere.step");
+    }
+
+    #[test]
+    fn cone_to_apex() {
+        assert_area("cone.step", 1e-3);
+        assert_oriented("cone.step");
+    }
+
+    #[test]
+    fn torus_face() {
+        assert_area("torus.step", 1e-3);
+        assert_oriented("torus.step");
+    }
+
+    #[test]
+    fn loft_bspline_face_area() {
+        assert_area("loft.step", 1e-3);
+        assert_area("revolve_spline.step", 1e-3);
+        assert_area("extrude_spline.step", 1e-3);
+        assert_area("fillet_box.step", 1e-3);
+    }
+
+    /// Every triangle's normal points the way of its face (surface normal, flipped when the face
+    /// does not follow its surface).
+    fn assert_oriented(name: &str) {
+        for m in mesh(name) {
+            for (si, fi, fm) in &m.faces {
+                let f = &m.brep.shells[*si].faces[*fi];
+                for t in &fm.tris {
+                    let [a, b, c] = t.map(|r| point(&m, fm, r));
+                    let (u, v) = (
+                        [b[0] - a[0], b[1] - a[1], b[2] - a[2]],
+                        [c[0] - a[0], c[1] - a[1], c[2] - a[2]],
+                    );
+                    let n = [
+                        u[1] * v[2] - u[2] * v[1],
+                        u[2] * v[0] - u[0] * v[2],
+                        u[0] * v[1] - u[1] * v[0],
+                    ];
+                    if dist(n, [0.0; 3]) <= 1e-9 * dist(u, [0.0; 3]) * dist(v, [0.0; 3]) {
+                        continue;
+                    }
+                    let centroid = [
+                        (a[0] + b[0] + c[0]) / 3.0,
+                        (a[1] + b[1] + c[1]) / 3.0,
+                        (a[2] + b[2] + c[2]) / 3.0,
+                    ];
+                    let (pu, pv) = f.surface.project(centroid, None).unwrap();
+                    let s = f.surface.normal(pu, pv);
+                    let d = (n[0] * s[0] + n[1] * s[1] + n[2] * s[2])
+                        * if f.same_sense { 1.0 } else { -1.0 };
+                    // Slivers standing on the surface next to a pole have a normal at right angles to it;
+                    // a flipped triangle points the other way.
+                    assert!(
+                        d > -0.01 * dist(n, [0.0; 3]),
+                        "{name}: face #{} has a triangle against its normal",
+                        f.id
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_triangle_within_deflection() {
+        let dir = format!("{}/tests/fixtures", env!("CARGO_MANIFEST_DIR"));
+        for f in std::fs::read_dir(dir).unwrap() {
+            let path = f.unwrap().path();
+            let name = path.file_name().unwrap().to_str().unwrap().to_string();
+            if !name.ends_with(".step") || name == "external_reference.step" {
+                continue;
+            }
+            for m in mesh(&name) {
+                for (si, fi, fm) in &m.faces {
+                    let face = &m.brep.shells[*si].faces[*fi];
+                    if matches!(face.surface, Surface::Plane(_)) {
+                        continue;
+                    }
+                    for t in &fm.tris {
+                        let [a, b, c] = t.map(|r| point(&m, fm, r));
+                        let centroid = [
+                            (a[0] + b[0] + c[0]) / 3.0,
+                            (a[1] + b[1] + c[1]) / 3.0,
+                            (a[2] + b[2] + c[2]) / 3.0,
+                        ];
+                        let (u, v) = face.surface.project(centroid, None).unwrap();
+                        let d = dist(face.surface.point(u, v), centroid);
+                        assert!(
+                            d <= DEFLECTION * 1.5 + 1e-9,
+                            "{name} face #{}: centroid {d} from the surface",
+                            face.id
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
