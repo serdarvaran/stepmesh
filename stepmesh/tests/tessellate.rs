@@ -521,6 +521,43 @@ mod seamless {
     }
 
     #[test]
+    fn whole_torus_is_closed() {
+        // A ring given as one face bounded by a vertex loop only: the whole parameter square,
+        // whose four corners are one point.
+        let (major, minor) = (40.0, 10.0);
+        let face = Face {
+            id: 1,
+            surface: Surface::Torus {
+                frame: frame(),
+                major,
+                minor,
+            },
+            same_sense: true,
+            outer: None,
+            loops: vec![(Loop::Vertex([major + minor, 0.0, 0.0]), true)],
+        };
+        let polys = HashMap::new();
+        let fm = tessellate_face(&face, &polys, &Options::default()).unwrap();
+        let key = |r: VRef| match r {
+            VRef::Inner(i) => i,
+            VRef::Edge { .. } => unreachable!("no edges"),
+        };
+        let directed: std::collections::HashSet<(usize, usize)> = fm
+            .tris
+            .iter()
+            .flat_map(|t| (0..3).map(move |k| (key(t[k]), key(t[(k + 1) % 3]))))
+            .collect();
+        let open = directed
+            .iter()
+            .filter(|&&(a, b)| !directed.contains(&(b, a)))
+            .count();
+        assert_eq!(open, 0, "open edges");
+        let want = TAU * TAU * major * minor;
+        let got = area(&fm, &polys);
+        assert!((got - want).abs() < 1e-3 * want, "{got} vs {want}");
+    }
+
+    #[test]
     fn torus_elbow_between_two_meridians() {
         // A pipe bend: the torus between its meridian circles at u = 0 and u = π/2. Both loops
         // go round along v; their direction picks the quarter or the other three quarters.

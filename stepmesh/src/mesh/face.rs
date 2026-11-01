@@ -590,7 +590,12 @@ impl Ctx<'_> {
             .map(|t| v0 + (v1 - v0) * t)
             .collect();
         // Left side (u = u0) shared with the right side (u = u1).
-        let side_v: Vec<VRef> = vs.iter().map(|&v| self.new_inner(s.point(u0, v))).collect();
+        let mut side_v: Vec<VRef> = vs.iter().map(|&v| self.new_inner(s.point(u0, v))).collect();
+        if pv.is_some() {
+            // Closed along v too: the side ends where it starts.
+            let last = side_v.len() - 1;
+            side_v[last] = side_v[0];
+        }
         let last = us.len() - 1;
         let mut row = |v: f64, collapsed: bool, end: VRef| -> Vec<VRef> {
             let mut r: Vec<VRef> = if collapsed {
