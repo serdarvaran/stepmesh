@@ -635,6 +635,56 @@ mod seamless {
     }
 
     #[test]
+    fn cylinder_wall_round_a_helical_slot() {
+        // A slot winding fifteen turns up a cylinder from its bottom rim; the wall face is the
+        // cylinder up to a top circle minus the slot. The slot's outline goes round the axis
+        // once in all but spans sixteen turns of parameter: a band joined at the wrong turn would
+        // cover the slot.
+        let (r, pitch, width, turns) = (5.0, 2.0, 1.0, 15.0);
+        // The slot ends a hair below the top circle.
+        let top = pitch * turns + width + 0.01;
+        let at = |t: f64, z: f64| [r * t.cos(), r * t.sin(), z];
+        let lower = |t: f64| pitch * t / TAU;
+        let samples = |from: f64, to: f64, z: &dyn Fn(f64) -> f64| -> Vec<[f64; 3]> {
+            let n = ((to - from).abs() / 0.02).ceil() as usize;
+            (0..=n)
+                .map(|k| {
+                    let t = from + (to - from) * k as f64 / n as f64;
+                    at(t, z(t))
+                })
+                .collect()
+        };
+        let end = TAU * turns;
+        let start_upper = -TAU * width / pitch;
+        let polys = HashMap::from([
+            (1u64, samples(TAU, 0.0, &|_| top)),
+            (2, samples(0.0, end, &lower)),
+            (3, vec![at(end, lower(end)), at(end, lower(end) + width)]),
+            (4, samples(end, start_upper, &|t| lower(t) + width)),
+            (5, samples(start_upper, -TAU, &|_| 0.0)),
+        ]);
+        let face = Face {
+            id: 1,
+            surface: Surface::Cylinder { frame: frame(), r },
+            same_sense: true,
+            outer: None,
+            loops: vec![
+                (Loop::Edges(vec![(1, true)]), true),
+                // As listed the slot lies on the outline's left; the wall lies on its right.
+                (
+                    Loop::Edges(vec![(2, true), (3, true), (4, true), (5, true)]),
+                    false,
+                ),
+            ],
+        };
+        let fm = tessellate_face(&face, &polys, &Options::default()).unwrap();
+        let slot = r * width * (end - start_upper / 2.0);
+        let want = TAU * r * top - slot;
+        let got = area(&fm, &polys);
+        assert!((got - want).abs() < 1e-3 * want, "{got} vs {want}");
+    }
+
+    #[test]
     fn several_boundary_points_at_a_pole() {
         // A flat triangle as a B-spline patch whose side u = 1 collapses to its apex C. The two
         // sides reaching C carry samples a hair from it, which count as the pole too: each must

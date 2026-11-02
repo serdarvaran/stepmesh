@@ -424,18 +424,14 @@ impl Ctx<'_> {
             }
         }
         let period = da.abs();
-        let mean_v = b.iter().map(|p| p.uv.1).sum::<f64>() / b.len() as f64;
-        let others: Vec<Vec<BPoint>> = holes.iter().cloned().chain([b.clone()]).collect();
-        let a = restart_at(&a, da, seam_start(&a, mean_v, &others, period));
+        let (i, k) = seam_pair(&a, &b, holes, period).unwrap_or_else(|| {
+            let mean_v = b.iter().map(|p| p.uv.1).sum::<f64>() / b.len() as f64;
+            let others: Vec<Vec<BPoint>> = holes.iter().cloned().chain([b.clone()]).collect();
+            let i = seam_start(&a, mean_v, &others, period);
+            (i, nearest_along_u(&b, a[i].uv.0, period))
+        });
+        let a = restart_at(&a, da, i);
         let target = a[0].uv.0 + da;
-        let gap = |x: f64| {
-            (x - target)
-                .rem_euclid(period)
-                .min((target - x).rem_euclid(period))
-        };
-        let k = (0..b.len())
-            .min_by(|&i, &j| gap(b[i].uv.0).total_cmp(&gap(b[j].uv.0)))
-            .unwrap_or(0);
         let shift = ((target - b[k].uv.0) / period).round() * period;
         let bk = (b[k].uv.0 + shift, b[k].uv.1);
         let seam = self.seam_points(a[0].uv, (bk.0 - da, bk.1));
@@ -885,21 +881,9 @@ const SEAM_CANDIDATES: usize = 256;
 fn seam_start(l: &[BPoint], v: f64, others: &[Vec<BPoint>], p: f64) -> usize {
     let mut order: Vec<usize> = (0..l.len()).filter(|&i| !l[i].pole).collect();
     order.sort_by(|&a, &b| (l[a].uv.1 - v).abs().total_cmp(&(l[b].uv.1 - v).abs()));
-    // A loop going round closes on its first point a period on.
-    let segments = |c: &[BPoint]| {
-        let n = c.len();
-        let turn = ((c[n - 1].uv.0 - c[0].uv.0) / p).round() * p;
-        (0..n)
-            .map(move |i| {
-                let next = c[(i + 1) % n].uv;
-                let shift = if i + 1 == n { turn } else { 0.0 };
-                (c[i].uv, (next.0 + shift, next.1))
-            })
-            .collect::<Vec<_>>()
-    };
-    let mut all = segments(l);
+    let mut all = loop_segments(l, p);
     for o in others {
-        all.extend(segments(o));
+        all.extend(loop_segments(o, p));
     }
     order
         .into_iter()
@@ -909,6 +893,66 @@ fn seam_start(l: &[BPoint], v: f64, others: &[Vec<BPoint>], p: f64) -> usize {
             !all.iter().any(|&(a, b)| crosses_seam(u, from, v, a, b, p))
         })
         .unwrap_or(0)
+}
+
+/// Segments of a loop in parameter space; a loop going round (period `p` along u) closes on its
+/// first point a period on.
+fn loop_segments(c: &[BPoint], p: f64) -> Vec<((f64, f64), (f64, f64))> {
+    let n = c.len();
+    let turn = ((c[n - 1].uv.0 - c[0].uv.0) / p).round() * p;
+    (0..n)
+        .map(|i| {
+            let next = c[(i + 1) % n].uv;
+            let shift = if i + 1 == n { turn } else { 0.0 };
+            (c[i].uv, (next.0 + shift, next.1))
+        })
+        .collect()
+}
+
+/// Index of the regular point of `l` nearest `u` along u, modulo the period `p`.
+fn nearest_along_u(l: &[BPoint], u: f64, p: f64) -> usize {
+    let gap = |x: f64| {
+        let d = (x - u).rem_euclid(p);
+        d.min(p - d)
+    };
+    (0..l.len())
+        .filter(|&i| !l[i].pole)
+        .min_by(|&x, &y| gap(l[x].uv.0).total_cmp(&gap(l[y].uv.0)))
+        .unwrap_or(0)
+}
+
+/// Points of the two loops of a band (`a` index, `b` index) joined by a seam straight along v
+/// that crosses no loop or hole. Candidates go along the loop spanning more of u (a loop
+/// winding several turns, as round a thread), nearest the other loop first, each with the
+/// other loop's point at the same angle.
+fn seam_pair(a: &[BPoint], b: &[BPoint], holes: &[Vec<BPoint>], p: f64) -> Option<(usize, usize)> {
+    let span = |l: &[BPoint]| {
+        let (lo, hi) = l.iter().fold((f64::MAX, f64::MIN), |(x, y), q| {
+            (x.min(q.uv.0), y.max(q.uv.0))
+        });
+        hi - lo
+    };
+    let swapped = span(a) > span(b);
+    let (along, other) = if swapped { (a, b) } else { (b, a) };
+    let other_v = other.iter().map(|q| q.uv.1).sum::<f64>() / other.len() as f64;
+    let mut order: Vec<usize> = (0..along.len()).filter(|&j| !along[j].pole).collect();
+    order.sort_by(|&x, &y| {
+        (along[x].uv.1 - other_v)
+            .abs()
+            .total_cmp(&(along[y].uv.1 - other_v).abs())
+    });
+    let mut segments = Vec::new();
+    for l in [a, b].into_iter().chain(holes.iter().map(Vec::as_slice)) {
+        segments.extend(loop_segments(l, p));
+    }
+    order.into_iter().take(SEAM_CANDIDATES).find_map(|j| {
+        let o = nearest_along_u(other, along[j].uv.0, p);
+        let (from, to) = (along[j].uv, other[o].uv);
+        let clear = !segments
+            .iter()
+            .any(|&(x, y)| crosses_seam(from.0, from.1, to.1, x, y, p));
+        clear.then_some(if swapped { (j, o) } else { (o, j) })
+    })
 }
 
 /// Whether segment `a`-`b` (or a copy a whole period `p` along u) meets the seam at `u` from
