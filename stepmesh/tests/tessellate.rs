@@ -635,6 +635,45 @@ mod seamless {
     }
 
     #[test]
+    fn several_boundary_points_at_a_pole() {
+        // A flat triangle as a B-spline patch whose side u = 1 collapses to its apex C. The two
+        // sides reaching C carry samples a hair from it, which count as the pole too: each must
+        // take its own part of the pole's row, not all of it.
+        use stepmesh::internals::Nurbs2;
+        let (a, b, c) = ([0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [5.0, 10.0, 0.0]);
+        let h = |p: [f64; 3]| [p[0], p[1], p[2], 1.0];
+        let patch = Surface::Nurbs(Nurbs2 {
+            du: 1,
+            dv: 1,
+            ku: vec![0.0, 0.0, 1.0, 1.0],
+            kv: vec![0.0, 0.0, 1.0, 1.0],
+            ctrl: vec![vec![h(a), h(b)], vec![h(c), h(c)]],
+            closed_u: false,
+            closed_v: false,
+        });
+        let along = |p: [f64; 3], q: [f64; 3], t: f64| {
+            [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t, 0.0]
+        };
+        let near_apex = |from: [f64; 3]| -> Vec<[f64; 3]> {
+            [0.0, 0.5, 1.0 - 3e-6, 1.0 - 2e-6, 1.0 - 1e-6, 1.0]
+                .iter()
+                .map(|&t| along(from, c, t))
+                .collect()
+        };
+        let polys = HashMap::from([(1u64, vec![a, b]), (2, near_apex(b)), (3, near_apex(a))]);
+        let face = Face {
+            id: 1,
+            surface: patch,
+            same_sense: true,
+            outer: Some(0),
+            loops: vec![(Loop::Edges(vec![(1, true), (2, true), (3, false)]), true)],
+        };
+        let fm = tessellate_face(&face, &polys, &Options::default()).unwrap();
+        let got = area(&fm, &polys);
+        assert!((got - 50.0).abs() < 1e-6 * 50.0, "{got}");
+    }
+
+    #[test]
     fn plane_with_a_parameter_a_hair_from_zero() {
         // Exporters write coordinates such as 1e-45 for zero; the triangulation takes no
         // magnitude that small but zero.

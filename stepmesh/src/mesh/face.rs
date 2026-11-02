@@ -270,8 +270,22 @@ impl Ctx<'_> {
                 });
                 continue;
             }
+            // Points a hair from a pole count as the pole too: a run of them shares the row
+            // between its regular neighbours, each taking its own part in order.
+            let in_run = |step: isize| {
+                (1..n)
+                    .map(|k| (i as isize + step * k as isize).rem_euclid(n as isize) as usize)
+                    .take_while(|&j| !regular(j) && sing[j] == sing[i])
+                    .count()
+            };
+            let (before, run) = (in_run(-1), in_run(-1) + in_run(1) + 1);
             let (a, b) = (neighbour(i, -1), neighbour(i, 1));
-            let (from, to) = if sing[i].0 { (a.0, b.0) } else { (a.1, b.1) };
+            let (start, end) = if sing[i].0 { (a.0, b.0) } else { (a.1, b.1) };
+            let part = (end - start) / run as f64;
+            let (from, to) = (
+                start + part * before as f64,
+                start + part * (before + 1) as f64,
+            );
             let steps = self.pole_steps(to - from);
             for k in 0..=steps {
                 let x = from + (to - from) * k as f64 / steps as f64;
