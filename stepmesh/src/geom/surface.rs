@@ -7,6 +7,8 @@ use crate::model::{Frame, P3, add, cross, dot, mul, norm, sub, unit};
 const NEWTON_STEPS: usize = 60;
 /// Grid points the projection starts from when the hint does not lead to the point.
 const MAX_STARTS: usize = 4;
+/// Parameter step, as a share of the range, for the derivatives of an offset surface's normal.
+const NORMAL_STEP: f64 = 1e-6;
 /// Curve points sampled for the half-plane of a surface of revolution's curve.
 const REVOLUTION_SAMPLES: usize = 16;
 const INF: f64 = f64::INFINITY;
@@ -49,6 +51,11 @@ pub enum Surface {
         curve: Curve,
         axis_origin: P3,
         axis_dir: P3,
+    },
+    /// `basis(u, v) + distance·normal(u, v)`, with the basis surface's parameters.
+    Offset {
+        basis: Box<Surface>,
+        distance: f64,
     },
 }
 
@@ -146,7 +153,41 @@ impl Surface {
                     rotate(dc, *axis_dir, u),
                 )
             }
+            Surface::Offset { basis, distance } => {
+                let (p, du, dv) = basis.derivs(u, v);
+                let n = basis.normal(u, v);
+                let [(u0, u1), (v0, v1)] = basis.param_bounds();
+                let (nu, nv) = (
+                    basis.normal_change(u, u0, u1, |x| (x, v)),
+                    basis.normal_change(v, v0, v1, |y| (u, y)),
+                );
+                (
+                    add(p, mul(n, *distance)),
+                    add(du, mul(nu, *distance)),
+                    add(dv, mul(nv, *distance)),
+                )
+            }
         }
+    }
+
+    /// Derivative of the unit normal along one parameter at `x` (range `lo..hi`), by central
+    /// differences kept inside the range: the bases give no second derivatives.
+    fn normal_change(&self, x: f64, lo: f64, hi: f64, at: impl Fn(f64) -> (f64, f64)) -> P3 {
+        let span = if (hi - lo).is_finite() {
+            hi - lo
+        } else {
+            1.0 + x.abs()
+        };
+        let h = NORMAL_STEP * span;
+        let (a, b) = ((x - h).max(lo), (x + h).min(hi));
+        if b <= a {
+            return [0.0; 3];
+        }
+        let (pa, pb) = (at(a), at(b));
+        mul(
+            sub(self.normal(pb.0, pb.1), self.normal(pa.0, pa.1)),
+            1.0 / (b - a),
+        )
     }
 
     /// Unit normal, `∂u × ∂v` direction.
@@ -157,6 +198,7 @@ impl Surface {
             Surface::Sphere { frame, r } => {
                 unit(sub(self.point(u, v), frame.origin)).map(|n| mul(n, r.signum()))
             }
+            Surface::Offset { basis, .. } => Some(basis.normal(u, v)),
             _ => None,
         };
         if let Some(n) = analytic {
@@ -197,6 +239,7 @@ impl Surface {
             }
             Surface::Extrusion { curve, .. } => (curve.period(), None),
             Surface::Revolution { curve, .. } => (Some(TAU), curve.period()),
+            Surface::Offset { basis, .. } => basis.period(),
         }
     }
 
@@ -209,6 +252,7 @@ impl Surface {
             }
             Surface::Extrusion { curve, .. } => [curve.breaks(), Vec::new()],
             Surface::Revolution { curve, .. } => [Vec::new(), curve.breaks()],
+            Surface::Offset { basis, .. } => basis.breaks(),
             _ => [Vec::new(), Vec::new()],
         }
     }
@@ -227,6 +271,7 @@ impl Surface {
             Surface::Nurbs(n) => n.range(),
             Surface::Extrusion { curve, .. } => [curve.param_range(), (-INF, INF)],
             Surface::Revolution { curve, .. } => [(0.0, TAU), curve.param_range()],
+            Surface::Offset { basis, .. } => basis.param_bounds(),
         }
     }
 
@@ -266,6 +311,11 @@ impl Surface {
                 let (e, _) = ring(f, u);
                 let q = sub(sub(p, f.origin), mul(e, *major));
                 (u, dot(q, f.z).atan2(dot(q, e)).rem_euclid(TAU))
+            }
+            Surface::Offset { basis, .. } => {
+                // A point of the offset surface is nearest the basis where it was offset from.
+                let q = basis.project(p, hint)?;
+                self.newton(p, q).unwrap_or(q)
             }
             _ => {
                 // From the hint first; from a grid when that fails or stops short of the point.

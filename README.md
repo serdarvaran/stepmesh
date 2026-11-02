@@ -40,10 +40,10 @@ for solid in &mesh.solids {
 | Units | `SI_UNIT` with prefixes, `CONVERSION_BASED_UNIT` (inch, foot, degree, …), per representation context |
 | Product structure | `SHAPE_DEFINITION_REPRESENTATION`, `SHAPE_REPRESENTATION_RELATIONSHIP`, `NEXT_ASSEMBLY_USAGE_OCCURRENCE` with `CONTEXT_DEPENDENT_SHAPE_REPRESENTATION` and `ITEM_DEFINED_TRANSFORMATION`, `MAPPED_ITEM`; files without product structure |
 | Solids | `MANIFOLD_SOLID_BREP`, `BREP_WITH_VOIDS`, `CLOSED_SHELL`, `ORIENTED_CLOSED_SHELL`, `ADVANCED_FACE`, `FACE_SURFACE`, `FACE_BOUND`, `FACE_OUTER_BOUND`, `EDGE_LOOP`, `VERTEX_LOOP`, `ORIENTED_EDGE`, `EDGE_CURVE`, `VERTEX_POINT` |
-| Surfaces | `PLANE`, `CYLINDRICAL_SURFACE`, `CONICAL_SURFACE`, `SPHERICAL_SURFACE`, `TOROIDAL_SURFACE`, B-spline surfaces (explicit knots, uniform, quasi-uniform, Bézier; rational), `SURFACE_OF_LINEAR_EXTRUSION`, `SURFACE_OF_REVOLUTION` |
+| Surfaces | `PLANE`, `CYLINDRICAL_SURFACE`, `CONICAL_SURFACE`, `SPHERICAL_SURFACE`, `TOROIDAL_SURFACE`, B-spline surfaces (explicit knots, uniform, quasi-uniform, Bézier; rational), `SURFACE_OF_LINEAR_EXTRUSION`, `SURFACE_OF_REVOLUTION`, `OFFSET_SURFACE` |
 | Curves | `LINE`, `CIRCLE`, `ELLIPSE`, B-spline curves (same forms), `SURFACE_CURVE`, `SEAM_CURVE`, `INTERSECTION_CURVE`, `TRIMMED_CURVE` |
 
-Not read yet, each an explicit error: `OFFSET_SURFACE`, `RECTANGULAR_TRIMMED_SURFACE`, AP242
+Not read yet, each an explicit error: `RECTANGULAR_TRIMMED_SURFACE`, AP242
 tessellated shapes, faceted B-reps and CSG solids, any other representation item that is not
 wireframe or annotation, open shells and surface models (no volume), assembly components without
 a shape (references to external documents), mirroring or scaling transformations, B-splines above

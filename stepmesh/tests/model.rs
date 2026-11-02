@@ -230,7 +230,7 @@ mod topology {
     }
 
     /// box.step with the surface of its first face wrapped in an OFFSET_SURFACE.
-    fn box_with_offset_surface() -> String {
+    fn box_with_trimmed_surface() -> String {
         let text = String::from_utf8(fixture("box.step")).unwrap();
         let line = text.lines().find(|l| l.contains("ADVANCED_FACE(")).unwrap();
         let (head, tail) = line.rsplit_once(",#").unwrap();
@@ -238,18 +238,21 @@ mod topology {
         let new_line = format!("{head},#9999,{rest}");
         text.replacen(line, &new_line, 1).replacen(
             "ENDSEC;\nEND-ISO",
-            &format!("#9999 = OFFSET_SURFACE('',#{surface},1.,.F.);\nENDSEC;\nEND-ISO"),
+            &format!(
+                "#9999 = RECTANGULAR_TRIMMED_SURFACE('',#{surface},0.,1.,0.,1.,.T.,.T.);\n\
+                 ENDSEC;\nEND-ISO"
+            ),
             1,
         )
     }
 
     #[test]
-    fn offset_surface_is_unsupported() {
-        let x = parse(box_with_offset_surface().as_bytes()).unwrap();
+    fn rectangular_trimmed_surface_is_unsupported() {
+        let x = parse(box_with_trimmed_surface().as_bytes()).unwrap();
         assert_eq!(
             first_brep(&x).err(),
             Some(Error::Unsupported {
-                entity: "OFFSET_SURFACE".into(),
+                entity: "RECTANGULAR_TRIMMED_SURFACE".into(),
                 id: 9999
             })
         );

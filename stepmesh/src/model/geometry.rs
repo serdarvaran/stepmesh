@@ -7,6 +7,7 @@ use crate::p21::{Record, Value};
 
 /// Wrappers (surface curves, trimmed curves) allowed around one curve.
 const MAX_CURVE_NESTING: usize = 8;
+const MAX_SURFACE_NESTING: usize = 8;
 
 /// Records that give a B-spline curve its knots, explicitly or by form.
 const CURVE_FORMS: [&str; 4] = [
@@ -256,6 +257,14 @@ impl Decoder<'_> {
     }
 
     pub(crate) fn surface(&self, id: u64, units: Units) -> Result<Surface, Error> {
+        self.nested_surface(id, units, 0)
+    }
+
+    /// `depth` counts the offset surfaces around the surface read.
+    fn nested_surface(&self, id: u64, units: Units, depth: usize) -> Result<Surface, Error> {
+        if depth > MAX_SURFACE_NESTING {
+            return self.invalid(id, "offset surfaces nested too deeply");
+        }
         let e = self.entity(id)?;
         if e.records
             .iter()
@@ -303,6 +312,17 @@ impl Decoder<'_> {
                     curve: self.curve(self.reference(id, r.params.get(1))?, units)?,
                     axis_origin,
                     axis_dir: unit(axis_dir).unwrap_or([0.0, 0.0, 1.0]),
+                })
+            }
+            "OFFSET_SURFACE" => {
+                let distance = self.real(id, r.params.get(2))? * s;
+                if !distance.is_finite() {
+                    return self.invalid(id, "offset distance out of range");
+                }
+                let basis = self.reference(id, r.params.get(1))?;
+                Ok(Surface::Offset {
+                    basis: Box::new(self.nested_surface(basis, units, depth + 1)?),
+                    distance,
                 })
             }
             _ => self.unsupported(id),

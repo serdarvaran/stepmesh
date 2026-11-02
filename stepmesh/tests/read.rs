@@ -150,6 +150,27 @@ fn zero_length_edge_joins_its_vertices() {
 }
 
 #[test]
+fn face_on_an_offset_surface() {
+    // Face #17 lies on the plane x = -5 (normal +x); written as that plane's offset by 1 from
+    // the plane x = -6.
+    let text = fixture("box.step");
+    let face = "#17 = ADVANCED_FACE('',(#18),#32,.F.);";
+    assert!(text.contains(face));
+    let text = text
+        .replacen(face, "#17 = ADVANCED_FACE('',(#18),#9040,.F.);", 1)
+        .replacen(
+            "ENDSEC;\nEND-ISO",
+            "#9040 = OFFSET_SURFACE('',#9041,1.,.F.);\n\
+             #9041 = PLANE('',#9042);\n\
+             #9042 = AXIS2_PLACEMENT_3D('',#9043,#35,#36);\n\
+             #9043 = CARTESIAN_POINT('',(-6.,-10.,-15.));\nENDSEC;\nEND-ISO",
+            1,
+        );
+    let m = read(&text).unwrap();
+    assert!((volume(&m) - 6000.0).abs() < 1e-9, "{}", volume(&m));
+}
+
+#[test]
 fn missing_face_is_not_watertight() {
     let text = fixture("box.step");
     let shell = text.lines().find(|l| l.contains("CLOSED_SHELL(")).unwrap();

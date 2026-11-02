@@ -131,6 +131,13 @@ fn surfaces(rng: &mut Rng) -> Vec<(&'static str, Surface)> {
             },
         ),
         (
+            "offset",
+            Surface::Offset {
+                basis: Box::new(Surface::Nurbs(nurbs_patch(rng))),
+                distance: 0.5,
+            },
+        ),
+        (
             // A ball about the z axis from a half circle in the yz plane: the profile starts
             // and ends on the axis (poles at both ends of v).
             "revolution from the axis",
@@ -341,8 +348,38 @@ const RATIONAL: &str = "ISO-10303-21;HEADER;FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));E
 CURVE()GEOMETRIC_REPRESENTATION_ITEM()RATIONAL_B_SPLINE_CURVE((1.,0.7071067811865476,1.))REPRESENTATION_ITEM(''));
 #5=CARTESIAN_POINT('',(0.,0.,0.));#6=DIRECTION('',(0.,0.,1.));#7=DIRECTION('',(1.,0.,0.));
 #8=AXIS2_PLACEMENT_3D('',#5,#6,#7);#9=CONICAL_SURFACE('',#8,2.,30.);
-#10=OFFSET_SURFACE('',#9,1.,.F.);
+#10=RECTANGULAR_TRIMMED_SURFACE('',#9,0.,1.,0.,1.,.T.,.T.);
 ENDSEC;END-ISO-10303-21;";
+
+const OFFSETS: &str = "ISO-10303-21;HEADER;FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));ENDSEC;DATA;
+#5=CARTESIAN_POINT('',(0.,0.,0.));#6=DIRECTION('',(0.,0.,1.));#7=DIRECTION('',(1.,0.,0.));
+#8=AXIS2_PLACEMENT_3D('',#5,#6,#7);#9=CYLINDRICAL_SURFACE('',#8,2.);
+#10=OFFSET_SURFACE('',#9,1.,.F.);#11=OFFSET_SURFACE('',#9,-0.5,.F.);
+#12=OFFSET_SURFACE('',#12,1.,.F.);
+ENDSEC;END-ISO-10303-21;";
+
+#[test]
+fn offset_surface_moves_along_the_normal() {
+    let x = parse(OFFSETS.as_bytes()).unwrap();
+    let units = Units {
+        length_mm: 1.0,
+        angle_rad: 1.0,
+    };
+    for (id, r) in [(10, 3.0), (11, 1.5)] {
+        let s = decode_surface(&x, id, units).unwrap();
+        for (u, v) in [(0.0, 0.0), (1.0, 2.0), (4.0, -3.0)] {
+            let want = [r * f64::cos(u), r * f64::sin(u), v];
+            assert!(dist(s.point(u, v), want) < 1e-12, "#{id} at ({u}, {v})");
+            let (pu, pv) = s.project(want, None).unwrap();
+            assert!(dist(s.point(pu, pv), want) < 1e-9, "#{id} projects");
+        }
+    }
+    // An offset of itself is an error, not an endless recursion.
+    assert!(matches!(
+        decode_surface(&x, 12, units),
+        Err(stepmesh::Error::Invalid { .. })
+    ));
+}
 
 #[test]
 fn rational_bspline_complex_entity_decodes() {
@@ -401,7 +438,7 @@ fn unknown_surface_is_unsupported() {
     assert_eq!(
         r.err(),
         Some(stepmesh::Error::Unsupported {
-            entity: "OFFSET_SURFACE".into(),
+            entity: "RECTANGULAR_TRIMMED_SURFACE".into(),
             id: 10
         })
     );
