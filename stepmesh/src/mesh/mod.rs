@@ -4,6 +4,7 @@ mod check;
 mod edges;
 mod face;
 mod param;
+mod seam;
 mod solid;
 
 pub(crate) use check::signed_volume;
