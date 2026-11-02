@@ -1036,6 +1036,96 @@ mod seamless {
     }
 
     #[test]
+    fn tube_with_creases_finishes() {
+        // A circle swept along a zigzag of eight straight pieces: the surface folds at each
+        // joint (a C0 knot line), where the normals jump and no refinement can bring them
+        // closer. The angle test stops at triangles too small to matter.
+        use stepmesh::internals::{Nurbs2, expand_knots};
+        let (r, a, h) = (5.0, 10.0, 10.0);
+        let w = FRAC_1_SQRT_2;
+        let circle = [
+            ([1.0, 0.0], 1.0),
+            ([1.0, 1.0], w),
+            ([0.0, 1.0], 1.0),
+            ([-1.0, 1.0], w),
+            ([-1.0, 0.0], 1.0),
+            ([-1.0, -1.0], w),
+            ([0.0, -1.0], 1.0),
+            ([1.0, -1.0], w),
+            ([1.0, 0.0], 1.0),
+        ];
+        let offsets = [0.0, a, 0.0, -a, 0.0, a, 0.0, -a, 0.0];
+        let ctrl = circle
+            .iter()
+            .map(|&([x, y], wt)| {
+                offsets
+                    .iter()
+                    .enumerate()
+                    .map(|(j, &dx)| {
+                        let p = [r * x + dx, r * y, h * j as f64];
+                        [p[0] * wt, p[1] * wt, p[2] * wt, wt]
+                    })
+                    .collect()
+            })
+            .collect();
+        let tube = Surface::Nurbs(Nurbs2 {
+            du: 2,
+            dv: 1,
+            ku: expand_knots(&[3, 2, 2, 2, 3], &[0.0, 0.25, 0.5, 0.75, 1.0]),
+            kv: expand_knots(
+                &[2, 1, 1, 1, 1, 1, 1, 1, 2],
+                &(0..=8).map(|j| j as f64 / 8.0).collect::<Vec<_>>(),
+            ),
+            ctrl,
+            closed_u: true,
+            closed_v: false,
+        });
+        let mut polys = HashMap::new();
+        let mut loops = Vec::new();
+        for (z, ccw, id) in [(0.0, true, 1u64), (8.0 * h, false, 2)] {
+            let frame = Frame::new(
+                [0.0, 0.0, z],
+                [0.0, 0.0, if ccw { 1.0 } else { -1.0 }],
+                [1.0, 0.0, 0.0],
+            )
+            .unwrap();
+            let start = frame.to_world([r, 0.0, 0.0]);
+            let e = Edge {
+                curve: Curve::Circle { frame, r },
+                start,
+                end: start,
+                start_vertex: id,
+                end_vertex: id,
+                same_sense: true,
+            };
+            polys.insert(id, discretize_edge(&e, &Options::default()).unwrap());
+            loops.push((Loop::Edges(vec![(id, true)]), true));
+        }
+        let face = Face {
+            id: 1,
+            surface: tube,
+            same_sense: true,
+            outer: None,
+            loops,
+        };
+        let fm = tessellate_face(&face, &polys, &Options::default()).unwrap();
+        // Each piece is an oblique cylinder: r ∫ sqrt(h² + a² cos² θ) dθ.
+        let n = 100_000;
+        let piece: f64 = (0..n)
+            .map(|k| {
+                let t = TAU * (k as f64 + 0.5) / n as f64;
+                (h * h + (a * t.cos()).powi(2)).sqrt()
+            })
+            .sum::<f64>()
+            * r
+            * TAU
+            / n as f64;
+        let want = 8.0 * piece;
+        let got = area(&fm, &polys);
+        assert!((got - want).abs() < 1e-3 * want, "{got} vs {want}");
+    }
+
+    #[test]
     fn band_seam_follows_a_wavy_tube() {
         // A circle swept along a wavy axis of four quadratic humps (tangent-continuous at their
         // joints): the seam (u = 0) sampled only at 1/4, 1/2 and 3/4 of its length lies on its

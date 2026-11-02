@@ -27,10 +27,13 @@ for solid in &mesh.solids {
   millimetre assembly is converted on its own), with assembly placements applied: one solid per
   placed instance.
 - Triangles stay within `Options::linear_deflection` (default 0.003 mm) of their surfaces, and the
-  normals of neighbouring vertices within `angular_deflection` (default 0.5 rad).
+  normals of neighbouring vertices within `angular_deflection` (default 0.5 rad) except across a
+  crease of the surface itself (a B-spline's C0 knot line), where no refinement can bring them
+  closer.
 - A file this crate cannot mesh faithfully fails with an [`Error`] naming the reason (unsupported
-  entity, open shell, a face that cannot be laid out in its parameter space, a mesh that would not
-  close). It never returns an approximate or partial result.
+  entity, open shell, a face that cannot be laid out in its parameter space, a face whose mesh does
+  not reach the tolerances, a mesh that would not close). It never returns an approximate or
+  partial result.
 
 ## Supported entities
 

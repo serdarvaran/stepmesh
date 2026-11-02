@@ -353,6 +353,12 @@ impl Surface {
         })
     }
 
+    /// Parameters of the surface point nearest `p` found from `start` alone (no search over the
+    /// surface): for points near the surface around a known parameter point.
+    pub fn foot(&self, p: P3, start: (f64, f64)) -> Option<(f64, f64)> {
+        self.newton(p, start)
+    }
+
     /// Angle around the frame's axis; on the axis itself the hint's angle (or 0) is used.
     fn azimuth(&self, f: &Frame, p: P3, hint: Option<(f64, f64)>) -> f64 {
         let d = sub(p, f.origin);

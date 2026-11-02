@@ -40,6 +40,12 @@ impl Param<'_> {
             .map(|q| self.order(q))
     }
 
+    pub fn foot(&self, p: P3, start: (f64, f64)) -> Option<(f64, f64)> {
+        self.surface
+            .foot(p, self.order(start))
+            .map(|q| self.order(q))
+    }
+
     pub fn period(&self) -> (Option<f64>, Option<f64>) {
         self.order(self.surface.period())
     }

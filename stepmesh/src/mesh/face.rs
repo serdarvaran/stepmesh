@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use spade::handles::FixedVertexHandle;
+use spade::handles::{FixedFaceHandle, FixedVertexHandle, InnerTag};
 use spade::{ConstrainedDelaunayTriangulation, Point2, PositionInTriangulation, Triangulation};
 
 use super::edges::sample_curve;
@@ -14,8 +14,18 @@ use crate::model::{Face, Loop, P3, add, dot, mul, norm, sub};
 use crate::{Error, Options};
 
 /// Refinement passes over the face; each inserts the centroid or edge midpoints of every
-/// triangle that is still too far from the surface.
-const MAX_REFINE_ROUNDS: usize = 40;
+/// triangle that is still too far from the surface, and the next looks only at the triangles
+/// around them. Along a long thin face the bad triangles move on a few at a time, so passes are
+/// many but cheap; a face still refining after this many is an error.
+const MAX_REFINE_ROUNDS: usize = 10_000;
+/// Twice the parameter area, as a share of the squared longest side, below which a triangle
+/// counts as flat.
+const FLAT: f64 = 1e-9;
+/// Distance from a boundary edge, as a share of its length, within which a refinement point
+/// counts as on it.
+const ON_EDGE: f64 = 1e-4;
+/// Triangles shorter than this many deflections are left to the distance test alone.
+const CREASE_SIZE: f64 = 10.0;
 /// Ratio of the parameter derivatives below which a direction counts as collapsed.
 const COLLAPSED: f64 = 1e-5;
 /// Most copies of one pole along its parameter row.
@@ -695,6 +705,9 @@ impl Ctx<'_> {
         }
         let planar = matches!(self.s.surface, Surface::Plane(_));
         let mut checked = Checked::default();
+        let mut converged = planar;
+        // After the first round only triangles around the points just inserted are new.
+        let mut fresh: Option<Vec<FixedVertexHandle>> = None;
         for _ in 0..if planar { 0 } else { MAX_REFINE_ROUNDS } {
             let inside = classify(&cdt);
             if let Some(limit) = self.o.max_triangles {
@@ -703,16 +716,30 @@ impl Ctx<'_> {
                     return Err(Error::TriangleLimit { count, limit });
                 }
             }
-            let candidates = self.refinement_points(&cdt, &inside, &info, &mut checked);
+            let candidates =
+                self.refinement_points(&cdt, &inside, &info, &mut checked, fresh.as_deref());
             if candidates.is_empty() {
+                converged = true;
                 break;
             }
-            for uv in candidates {
+            let mut inserted = Vec::new();
+            for (uv, near) in candidates {
                 // A point on a boundary edge would split it in this face only: a T-junction.
-                match cdt.locate(cdt_point(uv, su, sv)) {
+                let at = cdt_point(uv, su, sv);
+                match cdt.locate_with_hint(at, near) {
                     PositionInTriangulation::OnVertex(_) => continue,
                     PositionInTriangulation::OnEdge(e)
                         if cdt.is_constraint_edge(e.as_undirected()) =>
+                    {
+                        continue;
+                    }
+                    // A hair off a boundary edge counts as on it: such points pile up into flat
+                    // triangles the triangulation can no longer search.
+                    PositionInTriangulation::OnFace(f)
+                        if cdt.face(f).adjacent_edges().iter().any(|e| {
+                            cdt.is_constraint_edge(e.fix().as_undirected())
+                                && hair_off(at, e.from().position(), e.to().position())
+                        }) =>
                     {
                         continue;
                     }
@@ -720,7 +747,7 @@ impl Ctx<'_> {
                 }
                 let p = self.s.point(uv.0, uv.1);
                 let r = self.new_inner(p);
-                insert(
+                inserted.push(insert(
                     &mut cdt,
                     &mut info,
                     BPoint {
@@ -729,8 +756,17 @@ impl Ctx<'_> {
                         r,
                         pole: false,
                     },
-                )?;
+                )?);
             }
+            // What is left lies on boundary points or chords: the boundary polylines fix it.
+            if inserted.is_empty() {
+                converged = true;
+                break;
+            }
+            fresh = Some(inserted);
+        }
+        if !converged {
+            return Err(self.fail("the mesh does not reach the tolerances"));
         }
         let inside = classify(&cdt);
         let flip = !self.same_sense;
@@ -775,20 +811,54 @@ impl Ctx<'_> {
         (fix(su), fix(sv))
     }
 
+    /// Whether `p`, a point of a triangle or an edge whose longest side is `size` long, lies
+    /// within the deflection of the surface. The surface point at the matching parameters `uv`
+    /// is checked first; when that is too far, the nearest surface point is sought from there.
+    /// The parameter line between boundary points need not follow the chord between them, so
+    /// the first test alone flags slivers along the boundary forever; the nearest point must
+    /// stay within `size` of the first one, not land on some other part of the surface.
+    fn near_surface(&self, p: P3, uv: (f64, f64), size: f64) -> bool {
+        let d = self.o.linear_deflection;
+        let at = self.s.point(uv.0, uv.1);
+        if norm(sub(at, p)) <= d {
+            return true;
+        }
+        let Some(q) = self.s.foot(p, uv) else {
+            return false;
+        };
+        let foot = self.s.point(q.0, q.1);
+        norm(sub(foot, p)) <= d && norm(sub(foot, at)) <= size
+    }
+
     /// Centroids and edge midpoints of inside triangles that are too far from the surface or
-    /// that tilt too far from the surface.
+    /// that tilt too far from it, each with a vertex of its triangle or edge, where finding the
+    /// point in the triangulation starts.
     fn refinement_points(
         &self,
         cdt: &ConstrainedDelaunayTriangulation<Point2<f64>>,
         inside: &[bool],
         info: &[BPoint],
         checked: &mut Checked,
-    ) -> Vec<(f64, f64)> {
-        let (d, a) = (self.o.linear_deflection, self.o.angular_deflection);
+        fresh: Option<&[FixedVertexHandle]>,
+    ) -> Vec<((f64, f64), FixedVertexHandle)> {
+        let a = self.o.angular_deflection;
         let mut out = Vec::new();
         let cos_a = a.cos();
         checked.normals.resize(info.len(), None);
-        for face in cdt.inner_faces() {
+        let faces: Vec<FixedFaceHandle<InnerTag>> = match fresh {
+            None => cdt.inner_faces().map(|f| f.fix()).collect(),
+            Some(points) => {
+                let mut seen = FxSet::default();
+                points
+                    .iter()
+                    .flat_map(|&v| cdt.vertex(v).out_edges())
+                    .filter_map(|e| e.face().as_inner())
+                    .map(|f| f.fix())
+                    .filter(|f| seen.insert(f.index()))
+                    .collect()
+            }
+        };
+        for face in faces.into_iter().map(|f| cdt.face(f)) {
             if !inside[face.fix().index()] {
                 continue;
             }
@@ -809,7 +879,25 @@ impl Ctx<'_> {
                 (v[0].uv.1 + v[1].uv.1 + v[2].uv.1) / 3.0,
             );
             let p_c = mul(add(add(v[0].p, v[1].p), v[2].p), 1.0 / 3.0);
-            let off = norm(sub(self.s.point(uv_c.0, uv_c.1), p_c));
+            let size = (0..3)
+                .map(|i| norm(sub(v[i].p, v[(i + 1) % 3].p)))
+                .fold(0.0, f64::max);
+            // Corners on the surface (or on its boundary polylines) within the deflection of
+            // each other leave the triangle within the deflection too; refining such slivers
+            // along the boundary only makes thinner ones.
+            // A triangle flat in parameter space (a sliver of points a hair apart) has nothing
+            // inside to insert, and points there break the triangulation's search.
+            let [p0, p1, p2] = face.vertices().map(|h| h.position());
+            let area = ((p1.x - p0.x) * (p2.y - p0.y) - (p1.y - p0.y) * (p2.x - p0.x)).abs();
+            let longest = [(p0, p1), (p1, p2), (p2, p0)]
+                .iter()
+                .map(|(x, y)| (x.x - y.x).powi(2) + (x.y - y.y).powi(2))
+                .fold(0.0, f64::max);
+            if size <= self.o.linear_deflection || area <= FLAT * longest {
+                checked.triangles.insert(key);
+                continue;
+            }
+            let near = self.near_surface(p_c, uv_c, size);
             // The surface turns too much between the corners (pole copies excluded: there the
             // normal depends on the side the pole is approached from).
             let normals: Vec<P3> = (0..3)
@@ -819,10 +907,13 @@ impl Ctx<'_> {
                         .get_or_insert_with(|| self.s.normal(v[i].uv.0, v[i].uv.1))
                 })
                 .collect();
-            let turns = (0..normals.len())
-                .any(|i| (i + 1..normals.len()).any(|j| dot(normals[i], normals[j]) < cos_a));
-            if off > d || turns {
-                out.push(uv_c);
+            // On a triangle this small the normals can only turn that far at a crease of the
+            // surface (a C0 knot line), which no refinement smooths.
+            let turns = size > CREASE_SIZE * self.o.linear_deflection
+                && (0..normals.len())
+                    .any(|i| (i + 1..normals.len()).any(|j| dot(normals[i], normals[j]) < cos_a));
+            if !near || turns {
+                out.push((uv_c, face.vertices()[0].fix()));
             } else {
                 checked.triangles.insert(key);
             }
@@ -837,8 +928,8 @@ impl Ctx<'_> {
                 }
                 let [x, y] = ends.map(|h| info[h as usize]);
                 let uv_m = ((x.uv.0 + y.uv.0) / 2.0, (x.uv.1 + y.uv.1) / 2.0);
-                if norm(sub(self.s.point(uv_m.0, uv_m.1), mul(add(x.p, y.p), 0.5))) > d {
-                    out.push(uv_m);
+                if !self.near_surface(mul(add(x.p, y.p), 0.5), uv_m, norm(sub(x.p, y.p))) {
+                    out.push((uv_m, e.from().fix()));
                 }
             }
         }
@@ -853,6 +944,14 @@ struct Checked {
     triangles: FxSet<[u32; 3]>,
     edges: FxSet<[u32; 2]>,
     normals: Vec<Option<P3>>,
+}
+
+/// Whether `p` lies within `ON_EDGE` of the segment's length of the segment `a`-`b`.
+fn hair_off(p: Point2<f64>, a: Point2<f64>, b: Point2<f64>) -> bool {
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let len2 = dx * dx + dy * dy;
+    let cross = (p.x - a.x) * dy - (p.y - a.y) * dx;
+    cross.abs() <= ON_EDGE * len2
 }
 
 /// Scaled parameters as a triangulation point. The triangulation rejects magnitudes below
