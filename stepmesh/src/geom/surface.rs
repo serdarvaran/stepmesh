@@ -5,6 +5,13 @@ use super::nurbs::Nurbs2;
 use crate::model::{Frame, P3, add, cross, dot, mul, norm, sub, unit};
 
 const NEWTON_STEPS: usize = 60;
+/// Share of the decrease a projection step's linear model promises that the step must reach.
+const SUFFICIENT_DECREASE: f64 = 0.25;
+/// Precision of a projection's foot point, as a share of the point's distance from the surface.
+const FOOT_PRECISION: f64 = 1e-7;
+/// How far, as a share of the range, a B-spline or a swept curve's parameter may run past its
+/// range.
+const EXTENSION: f64 = 0.05;
 /// Grid points the projection starts from when the hint does not lead to the point.
 const MAX_STARTS: usize = 4;
 /// Parameter step, as a share of the range, for the derivatives of an offset surface's normal.
@@ -343,6 +350,7 @@ impl Surface {
                 }
             }
         };
+        let (u, v) = self.past_bounds(p, (u, v));
         let (pu, pv) = self.period();
         Some(match hint {
             Some((hu, hv)) => (
@@ -356,7 +364,52 @@ impl Surface {
     /// Parameters of the surface point nearest `p` found from `start` alone (no search over the
     /// surface): for points near the surface around a known parameter point.
     pub fn foot(&self, p: P3, start: (f64, f64)) -> Option<(f64, f64)> {
-        self.newton(p, start)
+        self.newton_within(p, start, self.extended_bounds())
+    }
+
+    /// Parameter bounds with the directions that follow a B-spline or a swept curve extended
+    /// past their range: such surfaces continue smoothly beyond it. (A periodic direction is
+    /// never held at its bounds, extended or not.)
+    fn extended_bounds(&self) -> [(f64, f64); 2] {
+        let bounds = self.param_bounds();
+        let along = match self {
+            Surface::Nurbs(_) => [true, true],
+            Surface::Extrusion { .. } => [true, false],
+            Surface::Revolution { .. } => [false, true],
+            Surface::Offset { basis, .. } => return basis.extended_bounds(),
+            _ => [false, false],
+        };
+        let widen = |(lo, hi): (f64, f64), extend: bool| {
+            if extend && (hi - lo).is_finite() {
+                let margin = EXTENSION * (hi - lo);
+                (lo - margin, hi + margin)
+            } else {
+                (lo, hi)
+            }
+        };
+        [widen(bounds[0], along[0]), widen(bounds[1], along[1])]
+    }
+
+    /// A projection held at the end of a B-spline or swept surface's range, off the surface,
+    /// retried on the surface extended past it: files carry edges that run beyond the end of
+    /// their surface within their modelling tolerance.
+    fn past_bounds(&self, p: P3, q: (f64, f64)) -> (f64, f64) {
+        let (bounds, wide) = (self.param_bounds(), self.extended_bounds());
+        let (pu, pv) = self.period();
+        let held = |x: f64, i: usize| {
+            wide[i] != bounds[i] && [pu, pv][i].is_none() && (x <= bounds[i].0 || x >= bounds[i].1)
+        };
+        if !held(q.0, 0) && !held(q.1, 1) {
+            return q;
+        }
+        let d = dist2(self.point(q.0, q.1), p);
+        if d.sqrt() <= 1e-9 * (1.0 + norm(p)) {
+            return q;
+        }
+        match self.newton_within(p, q, wide) {
+            Some(r) if dist2(self.point(r.0, r.1), p) < d => r,
+            _ => q,
+        }
     }
 
     /// Angle around the frame's axis; on the axis itself the hint's angle (or 0) is used.
@@ -440,10 +493,18 @@ impl Surface {
         out.into_iter().map(|(_, uv)| uv).collect()
     }
 
+    fn newton(&self, p: P3, start: (f64, f64)) -> Option<(f64, f64)> {
+        self.newton_within(p, start, self.param_bounds())
+    }
+
     /// Gauss–Newton on the squared distance with step halving; non-periodic parameters stay in
-    /// bounds, and a parameter held at its bound by the step leaves the other to move alone.
-    fn newton(&self, p: P3, (mut u, mut v): (f64, f64)) -> Option<(f64, f64)> {
-        let [(u0, u1), (v0, v1)] = self.param_bounds();
+    /// `bounds`, and a parameter held at its bound by the step leaves the other to move alone.
+    fn newton_within(
+        &self,
+        p: P3,
+        (mut u, mut v): (f64, f64),
+        [(u0, u1), (v0, v1)]: [(f64, f64); 2],
+    ) -> Option<(f64, f64)> {
         let (pu, pv) = self.period();
         let keep = |x: f64, lo: f64, hi: f64, per: Option<f64>| {
             if per.is_some() { x } else { x.clamp(lo, hi) }
@@ -488,7 +549,13 @@ impl Surface {
             for _ in 0..30 {
                 nu = keep(u + du, u0, u1, pu);
                 nv = keep(v + dv, v0, v1, pv);
-                if dist2(self.point(nu, nv), p) <= before {
+                // A step must win a share of the decrease its linear model promises: far from a
+                // curved surface the model overshoots, and steps that merely decrease bounce
+                // across the minimum, closing in on it by a hair per step.
+                let promised =
+                    2.0 * (g1 * du + g2 * dv) - (a * du * du + 2.0 * b * du * dv + c * dv * dv);
+                let after = dist2(self.point(nu, nv), p);
+                if after <= before && before - after >= SUFFICIENT_DECREASE * promised {
                     break;
                 }
                 du *= 0.5;
@@ -527,6 +594,8 @@ impl Surface {
             ),
             _ => return None,
         };
-        (norm(step) <= 1e-9 * (1.0 + norm(p))).then_some((u, v))
+        // Squared distances place the foot of a point at distance `nr` only to about the square
+        // root of the arithmetic's precision times `nr`.
+        (norm(step) <= 1e-9 * (1.0 + norm(p)) + FOOT_PRECISION * nr).then_some((u, v))
     }
 }

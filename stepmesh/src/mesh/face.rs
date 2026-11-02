@@ -7,7 +7,7 @@ use spade::{ConstrainedDelaunayTriangulation, Point2, PositionInTriangulation, T
 
 use super::edges::sample_curve;
 use super::param::Param;
-use super::seam::{free_param, nearest_along_u, restart_at, seam_pair, seam_start};
+use super::seam::{free_param, nearest_along_u, restart_at, seam_pair, seam_route, seam_start};
 use crate::fxhash::FxSet;
 use crate::geom::Surface;
 use crate::model::{Face, Loop, P3, add, dot, mul, norm, sub};
@@ -28,6 +28,9 @@ const ON_EDGE: f64 = 1e-4;
 const CREASE_SIZE: f64 = 10.0;
 /// Ratio of the parameter derivatives below which a direction counts as collapsed.
 const COLLAPSED: f64 = 1e-5;
+/// Change of the periodic parameter between neighbouring boundary points, as a share of the
+/// period, that only passing a pole explains (edges are sampled in far smaller angular steps).
+const POLE_JUMP: f64 = 0.25;
 /// Most copies of one pole along its parameter row.
 const MAX_POLE_COPIES: usize = 64;
 /// A boundary point may lie this far from the face's surface: files carry edge curves that
@@ -66,6 +69,8 @@ struct Ctx<'a> {
     same_sense: bool,
     o: &'a Options,
     inner: Vec<P3>,
+    /// Edges whose polylines cross in parameter space, when they do.
+    crossing: Vec<u64>,
 }
 
 pub fn tessellate_face(
@@ -73,6 +78,17 @@ pub fn tessellate_face(
     edges: &HashMap<u64, Vec<P3>>,
     o: &Options,
 ) -> Result<FaceMesh, Error> {
+    tessellate(f, edges, o).map_err(|(e, _)| e)
+}
+
+/// As [`tessellate_face`]; when the boundary crosses itself, the error comes with the edges whose
+/// polylines cross, which finer samples may part.
+pub(super) fn tessellate(
+    f: &Face,
+    edges: &HashMap<u64, Vec<P3>>,
+    o: &Options,
+) -> Result<FaceMesh, (Error, Vec<u64>)> {
+    let plain = |e: Error| (e, Vec::new());
     let ctx = |swapped: bool| Ctx {
         f,
         s: Param {
@@ -82,24 +98,33 @@ pub fn tessellate_face(
         same_sense: f.same_sense != swapped,
         o,
         inner: Vec::new(),
+        crossing: Vec::new(),
     };
     let mut c = ctx(false);
-    let mut loops = c.map_loops(edges)?;
+    let mut loops = c.map_loops(edges).map_err(plain)?;
     // Loops going round along v only are closed with u and v swapped.
     let along = |c: &Ctx, l: &[BPoint]| c.advance(l);
     if loops.iter().any(|l| along(&c, l).1 != 0.0) && loops.iter().all(|l| along(&c, l).0 == 0.0) {
         c = ctx(true);
-        loops = c.map_loops(edges)?;
+        loops = c.map_loops(edges).map_err(plain)?;
     }
     if loops.is_empty() {
-        loops = c.full_domain((0.0, 0.0))?;
+        loops = c.full_domain((0.0, 0.0)).map_err(plain)?;
     } else {
-        loops = c.close_wraps(loops)?;
+        loops = c.close_wraps(loops).map_err(plain)?;
         // A face can lie outside all its loops on a closed surface (a sphere with holes): the
         // whole parameter domain is then its outer boundary. Not when a loop is given as the
         // outer bound: some exporters write such faces against their surface's normal, and the
         // face is the region inside it.
         let side = if c.same_sense { 1.0 } else { -1.0 };
+        // The face lies left of its outer bound seen from its normal. A lone outer bound running
+        // the other way was written against the surface's normal (vertex blends on surfaces of
+        // revolution): its edges, shared with the neighbours, fix the side the mesh faces.
+        if let ([l], Some(_)) = (loops.as_slice(), f.outer) {
+            if side * signed_area(l) < 0.0 {
+                c.same_sense = !c.same_sense;
+            }
+        }
         let (pu, pv) = c.s.period();
         if let (Some(pu), None) = (pu, f.outer) {
             if loops.iter().all(|l| side * signed_area(l) < 0.0) {
@@ -108,12 +133,105 @@ pub fn tessellate_face(
                     free_param(&loops, 0, pu),
                     pv.map_or(0.0, |p| free_param(&loops, 1, p)),
                 );
-                loops.extend(c.full_domain(start)?);
+                loops.extend(c.full_domain(start).map_err(plain)?);
             }
         }
     }
     c.align(&mut loops);
     c.triangulate(&loops)
+        .map_err(|e| (e, std::mem::take(&mut c.crossing)))
+}
+
+/// Mesh of a plane face bounded by one loop whose polylines cross (two curves closer than the
+/// tolerance, a cusp): the loop cut into ears. Any triangulation of the loop that keeps its
+/// orientation covers the same signed area of the plane, so the solid's volume stays exact where
+/// the boundary overlaps itself.
+pub(super) fn clip_ears(
+    f: &Face,
+    edges: &HashMap<u64, Vec<P3>>,
+    o: &Options,
+) -> Result<FaceMesh, Error> {
+    let c = Ctx {
+        f,
+        s: Param {
+            surface: &f.surface,
+            swapped: false,
+        },
+        same_sense: f.same_sense,
+        o,
+        inner: Vec::new(),
+        crossing: Vec::new(),
+    };
+    let crossing = || c.fail("the boundary crosses itself in parameter space");
+    let loops = c.map_loops(edges)?;
+    let [l] = loops.as_slice() else {
+        return Err(crossing());
+    };
+    let ccw = signed_area(l) > 0.0;
+    let turn = |a: (f64, f64), b: (f64, f64), c: (f64, f64)| {
+        (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0)
+    };
+    let mut ring: Vec<usize> = (0..l.len()).collect();
+    let mut tris = Vec::with_capacity(l.len());
+    // The search for the next ear starts where the last one was cut.
+    let mut last = 0;
+    while ring.len() > 3 {
+        let n = ring.len();
+        let corner = |k: usize| {
+            let (a, b, c) = (ring[(k + n - 1) % n], ring[k], ring[(k + 1) % n]);
+            (a, b, c, turn(l[a].uv, l[b].uv, l[c].uv))
+        };
+        let convex = |t: f64| if ccw { t > 0.0 } else { t < 0.0 };
+        let empty = |a: usize, b: usize, c: usize| {
+            ring.iter().all(|&j| {
+                j == a || j == b || j == c || {
+                    let p = l[j].uv;
+                    let s = [
+                        turn(l[a].uv, l[b].uv, p),
+                        turn(l[b].uv, l[c].uv, p),
+                        turn(l[c].uv, l[a].uv, p),
+                    ];
+                    !(s.iter().all(|&x| x >= 0.0) || s.iter().all(|&x| x <= 0.0))
+                }
+            })
+        };
+        // An ear empty of other boundary points, else (where the boundary overlaps itself) the
+        // smallest convex corner, else the flattest one.
+        let k = (0..n)
+            .map(|i| (last + i) % n)
+            .find(|&k| {
+                let (a, b, c, t) = corner(k);
+                convex(t) && empty(a, b, c)
+            })
+            .or_else(|| {
+                (0..n)
+                    .filter(|&k| convex(corner(k).3))
+                    .min_by(|&x, &y| corner(x).3.abs().total_cmp(&corner(y).3.abs()))
+            })
+            .unwrap_or_else(|| {
+                (0..n)
+                    .min_by(|&x, &y| corner(x).3.abs().total_cmp(&corner(y).3.abs()))
+                    .unwrap_or(0)
+            });
+        let (a, b, c, _) = corner(k);
+        tris.push([l[a].r, l[b].r, l[c].r]);
+        ring.remove(k);
+        last = k.saturating_sub(1);
+    }
+    if let [a, b, c] = ring[..] {
+        tris.push([l[a].r, l[b].r, l[c].r]);
+    }
+    // Oriented as `triangulate` orients: counter-clockwise in parameter space seen from the
+    // surface's normal, reversed for a face against it.
+    let flip = ccw != c.same_sense;
+    Ok(FaceMesh {
+        inner: Vec::new(),
+        tris: tris
+            .into_iter()
+            .filter(|[a, b, c]| a != b && b != c && a != c)
+            .map(|[a, b, c]| if flip { [a, c, b] } else { [a, b, c] })
+            .collect(),
+    })
 }
 
 /// Points of a bound in traversal order, each edge's last point left to the next edge.
@@ -212,14 +330,20 @@ impl Ctx<'_> {
         }
         let plain = self.spread(pts, &uv, &sing);
         // After a pole the next meridian's angle is known only up to a period; when the loop does
-        // not close, or closes the wrong way round, try the other choices.
+        // not close, or closes the wrong way round, try the other choices. A loop passing a hair
+        // from a pole (a great circle through both) jumps there by half a period between two
+        // regular points: the same choice.
         let Some(period) = self.s.period().0 else {
             return Ok(plain);
         };
         let mut segment = vec![0usize; pts.len()];
         let mut blocks = 0;
         for i in 0..pts.len() {
-            if sing[i].0 && (i == 0 || !sing[i - 1].0) {
+            let jump = i > 0
+                && !sing[i].0
+                && !sing[i - 1].0
+                && (uv[i].0 - uv[i - 1].0).abs() > POLE_JUMP * period;
+            if (sing[i].0 && (i == 0 || !sing[i - 1].0)) || jump {
                 blocks += 1;
             }
             segment[i] = blocks;
@@ -435,17 +559,35 @@ impl Ctx<'_> {
             }
         }
         let period = da.abs();
-        let (i, k) = seam_pair(&a, &b, holes, period).unwrap_or_else(|| {
-            let mean_v = b.iter().map(|p| p.uv.1).sum::<f64>() / b.len() as f64;
-            let others: Vec<Vec<BPoint>> = holes.iter().cloned().chain([b.clone()]).collect();
-            let i = seam_start(&a, mean_v, &others, period);
-            (i, nearest_along_u(&b, a[i].uv.0, period))
-        });
+        // Straight where a straight seam passes, else winding between the holes.
+        let (i, k, route) = match seam_pair(&a, &b, holes, period) {
+            Some((i, k)) => (i, k, None),
+            None => match seam_route(&a, &b, holes, period) {
+                Some(r) => (r.from, r.to, Some(r.corners)),
+                None => {
+                    let mean_v = b.iter().map(|p| p.uv.1).sum::<f64>() / b.len() as f64;
+                    let others: Vec<Vec<BPoint>> =
+                        holes.iter().cloned().chain([b.clone()]).collect();
+                    let i = seam_start(&a, mean_v, &others, period);
+                    (i, nearest_along_u(&b, a[i].uv.0, period), None)
+                }
+            },
+        };
         let a = restart_at(&a, da, i);
-        let target = a[0].uv.0 + da;
-        let shift = ((target - b[k].uv.0) / period).round() * period;
-        let bk = (b[k].uv.0 + shift, b[k].uv.1);
-        let seam = self.seam_points(a[0].uv, (bk.0 - da, bk.1));
+        // Corners of the seam from `a`'s first point to `b`'s point next to it.
+        let route = match route {
+            Some(r) => {
+                let s = a[0].uv.0 - r[0].0;
+                r.iter().map(|&(u, v)| (u + s, v)).collect()
+            }
+            None => {
+                let shift = ((a[0].uv.0 + da - b[k].uv.0) / period).round() * period;
+                vec![a[0].uv, (b[k].uv.0 + shift - da, b[k].uv.1)]
+            }
+        };
+        let end = route[route.len() - 1];
+        let shift = ((end.0 + da - b[k].uv.0) / period).round() * period;
+        let seam = self.route_points(&route);
         let mut out = a.clone();
         out.push(BPoint {
             uv: (a[0].uv.0 + da, a[0].uv.1),
@@ -465,6 +607,26 @@ impl Ctx<'_> {
             });
         }
         out.extend(seam.iter().rev().copied());
+        out
+    }
+
+    /// Points of a seam along the straight parameter lines between its corners, the inner
+    /// corners included (new face vertices).
+    fn route_points(&mut self, route: &[(f64, f64)]) -> Vec<BPoint> {
+        let mut out = Vec::new();
+        for (k, w) in route.windows(2).enumerate() {
+            if k > 0 {
+                let p = self.s.point(w[0].0, w[0].1);
+                let r = self.new_inner(p);
+                out.push(BPoint {
+                    uv: w[0],
+                    p,
+                    r,
+                    pole: false,
+                });
+            }
+            out.extend(self.seam_points(w[0], w[1]));
+        }
         out
     }
 
@@ -550,10 +712,38 @@ impl Ctx<'_> {
             return;
         };
         let (rc, _) = centre(&loops[reference]);
-        for l in loops.iter_mut() {
+        let (lo, hi) = bounds(&loops[reference]);
+        // Along a direction the reference spans more than a period of (a helical strip), more
+        // than one shift puts a loop beside it; the loop belongs where it lies inside it.
+        let shifts = |period: Option<f64>, width: f64| -> Vec<f64> {
+            match period {
+                Some(p) if width > p => {
+                    let n = (width / p).ceil() as i32 + 1;
+                    let mut ks: Vec<i32> = (-n..=n).collect();
+                    ks.sort_by_key(|k| k.abs());
+                    ks.into_iter().map(|k| k as f64 * p).collect()
+                }
+                _ => vec![0.0],
+            }
+        };
+        let (su, sv) = (shifts(pu, hi.0 - lo.0), shifts(pv, hi.1 - lo.1));
+        let outer = if su.len() > 1 || sv.len() > 1 {
+            loops[reference].clone()
+        } else {
+            Vec::new()
+        };
+        for (i, l) in loops.iter_mut().enumerate() {
             let (c, _) = centre(l);
             let du = pu.map_or(0.0, |p| ((rc.0 - c.0) / p).round() * p);
             let dv = pv.map_or(0.0, |p| ((rc.1 - c.1) / p).round() * p);
+            let (du, dv) = if i == reference || (su.len() == 1 && sv.len() == 1) {
+                (du, dv)
+            } else {
+                su.iter()
+                    .flat_map(|&a| sv.iter().map(move |&b| (du + a, dv + b)))
+                    .find(|&(a, b)| mostly_inside(l, (a, b), &outer))
+                    .unwrap_or((du, dv))
+            };
             for b in l.iter_mut() {
                 b.uv = (b.uv.0 + du, b.uv.1 + dv);
             }
@@ -696,6 +886,18 @@ impl Ctx<'_> {
             for i in 0..handles.len() {
                 let (a, b) = (handles[i], handles[(i + 1) % handles.len()]);
                 if a != b && !cdt.can_add_constraint(a, b) && !cdt.exists_constraint(a, b) {
+                    let mut crossing: Vec<u64> = cdt
+                        .get_conflicting_edges_between_vertices(a, b)
+                        .flat_map(|e| e.vertices().map(|v| v.fix()))
+                        .chain([a, b])
+                        .filter_map(|v| match info[v.index()].r {
+                            VRef::Edge { edge, .. } => Some(edge),
+                            VRef::Inner(_) => None,
+                        })
+                        .collect();
+                    crossing.sort_unstable();
+                    crossing.dedup();
+                    self.crossing = crossing;
                     return Err(self.fail("the boundary crosses itself in parameter space"));
                 }
                 if a != b && !cdt.exists_constraint(a, b) {
@@ -988,6 +1190,43 @@ fn classify(cdt: &ConstrainedDelaunayTriangulation<Point2<f64>>) -> Vec<bool> {
         }
     }
     parity.into_iter().map(|p| p == Some(true)).collect()
+}
+
+/// Lowest and highest parameters of a loop.
+fn bounds(l: &[BPoint]) -> ((f64, f64), (f64, f64)) {
+    l.iter().fold(
+        ((f64::MAX, f64::MAX), (f64::MIN, f64::MIN)),
+        |(lo, hi), b| {
+            (
+                (lo.0.min(b.uv.0), lo.1.min(b.uv.1)),
+                (hi.0.max(b.uv.0), hi.1.max(b.uv.1)),
+            )
+        },
+    )
+}
+
+/// Points of a loop tested against another for containment.
+const INSIDE_SAMPLES: usize = 8;
+
+/// Whether most of a few points of `l`, moved by `shift`, lie inside `outer` (even-odd rule).
+fn mostly_inside(l: &[BPoint], shift: (f64, f64), outer: &[BPoint]) -> bool {
+    let step = (l.len() / INSIDE_SAMPLES).max(1);
+    let samples: Vec<(f64, f64)> = l
+        .iter()
+        .step_by(step)
+        .map(|b| (b.uv.0 + shift.0, b.uv.1 + shift.1))
+        .collect();
+    let inside = |(x, y): (f64, f64)| {
+        let mut odd = false;
+        for i in 0..outer.len() {
+            let (a, b) = (outer[i].uv, outer[(i + 1) % outer.len()].uv);
+            if (a.1 > y) != (b.1 > y) && x < a.0 + (y - a.1) / (b.1 - a.1) * (b.0 - a.0) {
+                odd = !odd;
+            }
+        }
+        odd
+    };
+    2 * samples.iter().filter(|&&p| inside(p)).count() > samples.len()
 }
 
 /// Shoelace area of a loop in parameter space, positive when counter-clockwise.

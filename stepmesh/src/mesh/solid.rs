@@ -3,10 +3,17 @@
 use std::collections::HashMap;
 
 use super::edges::discretize_edge;
-use super::face::{VRef, tessellate_face};
+use super::face::{FaceMesh, VRef, clip_ears, tessellate};
 use crate::fxhash::FxMap;
-use crate::model::{Brep, P3, cross, dot, norm, sub};
+use crate::geom::Surface;
+use crate::model::{Brep, Face, Loop, P3, cross, dot, norm, sub};
 use crate::{Error, Options};
+
+type Polylines = HashMap<u64, Vec<P3>>;
+
+/// Times the samples of an edge are made finer (each halving the chord tolerance) when its
+/// polyline crosses another in a face's parameter space.
+const MAX_EDGE_REFINEMENTS: u32 = 8;
 
 /// Vertex identity across the faces of a solid: edge end points are the B-rep's vertices.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -30,20 +37,17 @@ pub fn mesh_brep(
     solid: usize,
     budget: Option<usize>,
 ) -> Result<LocalMesh, Error> {
-    let mut polys = HashMap::with_capacity(b.edges.len());
-    for (&id, e) in &b.edges {
-        polys.insert(id, discretize_edge(e, o)?);
-    }
+    let (polys, meshes) = mesh_faces(b, o)?;
     let joined = joined_vertices(b);
     let vertex = |v: u64| joined.get(&v).copied().unwrap_or(v);
     let mut index: FxMap<Key, u32> = FxMap::default();
     let mut positions: Vec<P3> = Vec::new();
     let mut triangles = Vec::new();
     let mut face_no = 0;
+    let mut meshes = meshes.into_iter();
     for shell in &b.shells {
         let mut shell_tris = Vec::new();
-        for f in &shell.faces {
-            let fm = tessellate_face(f, &polys, o)?;
+        for fm in meshes.by_ref().take(shell.faces.len()) {
             let mut id = |r: VRef| -> u32 {
                 let (key, p) = match r {
                     VRef::Edge { edge, i } => {
@@ -90,6 +94,69 @@ pub fn mesh_brep(
         positions,
         triangles,
     })
+}
+
+/// Edge polylines and the mesh of every face, in shell order. Edges sampled to the tolerances
+/// can still cross in a face's parameter space where two curves run closer than the tolerance
+/// (a wall thinner than it, a face narrower than it): such edges are sampled again, finer, and
+/// the faces using them meshed again.
+fn mesh_faces(b: &Brep, o: &Options) -> Result<(Polylines, Vec<FaceMesh>), Error> {
+    let mut polys = HashMap::with_capacity(b.edges.len());
+    for (&id, e) in &b.edges {
+        polys.insert(id, discretize_edge(e, o)?);
+    }
+    let faces: Vec<&Face> = b.shells.iter().flat_map(|s| &s.faces).collect();
+    let mut meshes: Vec<Option<FaceMesh>> = vec![None; faces.len()];
+    let mut refinements: HashMap<u64, u32> = HashMap::new();
+    // Faces before `next` are meshed.
+    let mut next = 0;
+    while let Some(k) = (next..faces.len()).find(|&k| meshes[k].is_none()) {
+        next = k;
+        let (error, crossing) = match tessellate(faces[k], &polys, o) {
+            Ok(fm) => {
+                meshes[k] = Some(fm);
+                continue;
+            }
+            Err(failure) => failure,
+        };
+        if crossing.is_empty() {
+            return Err(error);
+        }
+        // Curves that cross within the tolerance stay crossed however fine their samples; on a
+        // plane the loop is cut into ears instead.
+        let spent = crossing.iter().any(|id| {
+            refinements
+                .get(id)
+                .is_some_and(|&n| n >= MAX_EDGE_REFINEMENTS)
+        });
+        if spent {
+            if !matches!(faces[k].surface, Surface::Plane(_)) {
+                return Err(error);
+            }
+            meshes[k] = Some(clip_ears(faces[k], &polys, o)?);
+            continue;
+        }
+        for &id in &crossing {
+            let level = refinements.entry(id).or_default();
+            *level += 1;
+            let finer = Options {
+                linear_deflection: o.linear_deflection / f64::from(1u32 << *level),
+                ..o.clone()
+            };
+            polys.insert(id, discretize_edge(&b.edges[&id], &finer)?);
+        }
+        for (j, f) in faces.iter().enumerate() {
+            let uses = f.loops.iter().any(|(l, _)| match l {
+                Loop::Edges(list) => list.iter().any(|(e, _)| crossing.contains(e)),
+                _ => false,
+            });
+            if uses {
+                meshes[j] = None;
+                next = next.min(j);
+            }
+        }
+    }
+    Ok((polys, meshes.into_iter().flatten().collect()))
 }
 
 /// Vertices joined by a zero-length edge (a sliver face's), each mapped to the smallest id of

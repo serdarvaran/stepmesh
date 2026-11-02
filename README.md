@@ -59,9 +59,12 @@ Each edge is sampled once, to the chord and angle tolerances, and both faces usi
 samples. Each face is laid out in its surface's (u, v) parameter space: boundary points are
 projected onto the surface, kept continuous across periodic seams, poles and apices are spread
 along their parameter row, and loops that go round a closed surface without a seam are closed
-through the pole or joined into a band. The region is triangulated with constraints on the
-boundary and refined where the surface leaves the triangles by more than the deflection. The
-result is checked: a solid whose mesh is not closed and consistently oriented is an error.
+through the pole or joined into a band, along a seam that winds between holes where no straight
+one passes. The region is triangulated with constraints on the boundary and refined where the
+surface leaves the triangles by more than the deflection. Edges whose polylines cross in a face's
+parameter space (two curves closer than the tolerance) are sampled again, finer; a plane face
+whose boundary still overlaps itself is cut into ears, which keeps its signed area. The result is
+checked: a solid whose mesh is not closed and consistently oriented is an error.
 
 ## Testing
 

@@ -682,3 +682,49 @@ fn unclamped_periodic_surface_is_closed() {
     });
     assert_eq!(s.period().0, Some(4.0));
 }
+
+#[test]
+fn projection_settles_a_radius_out_from_a_round_wall() {
+    // Outside a round wall at about its radius from it, the linear model of the distance puts
+    // the foot nearly twice as far as it is: steps that merely shorten the distance bounce
+    // across the foot, closing in by a few percent each.
+    let s = Surface::Extrusion {
+        curve: Curve::Nurbs(nurbs_circle(2.0)),
+        dir: [0.0, 0.0, 1.0],
+    };
+    for k in 0..16 {
+        let a = 0.1 + TAU * k as f64 / 16.0;
+        let p = [3.9 * a.cos(), 3.9 * a.sin(), 0.5];
+        let (u, v) = s
+            .project(p, None)
+            .unwrap_or_else(|| panic!("no foot for {p:?}"));
+        let foot = [2.0 * a.cos(), 2.0 * a.sin(), 0.5];
+        assert!(
+            dist(s.point(u, v), foot) < 1e-6,
+            "{p:?}: foot {:?}",
+            s.point(u, v)
+        );
+    }
+}
+
+#[test]
+fn projection_reaches_past_the_end_of_a_swept_curve() {
+    // Edges end beyond their surface by the file's tolerance: a point a hair past the end of an
+    // extruded curve lies on the curve's continuation.
+    let s = Surface::Extrusion {
+        curve: Curve::Nurbs(Nurbs1 {
+            degree: 2,
+            knots: vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            ctrl: vec![
+                [0.0, 0.0, 0.0, 1.0],
+                [5.0, 2.0, 0.0, 1.0],
+                [10.0, 0.0, 0.0, 1.0],
+            ],
+        }),
+        dir: [0.0, 0.0, 1.0],
+    };
+    let beyond = s.point(1.0002, 3.0);
+    let (u, v) = s.project(beyond, Some((0.99, 3.0))).unwrap();
+    assert!(u > 1.0, "held at the end: u {u}");
+    assert!(dist(s.point(u, v), beyond) < 1e-9);
+}

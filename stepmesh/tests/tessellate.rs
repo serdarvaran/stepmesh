@@ -1214,6 +1214,224 @@ mod seamless {
         let got = area(&fm, &polys);
         assert!((got - want).abs() < 1e-3 * want, "tube {got} vs {want}");
     }
+
+    /// Points of a closed outline given in cylinder parameters (angle, height), on radius `r`.
+    fn on_cylinder(r: f64, outline: impl Iterator<Item = (f64, f64)>) -> Vec<[f64; 3]> {
+        outline
+            .map(|(t, z)| [r * t.cos(), r * t.sin(), z])
+            .collect()
+    }
+
+    /// An ellipse in cylinder parameters, clockwise (a hole, the face on its left outside it).
+    fn hole(r: f64, centre: (f64, f64), half: (f64, f64)) -> Vec<[f64; 3]> {
+        let n = 64;
+        on_cylinder(
+            r,
+            (0..=n).map(|k| {
+                let a = -TAU * k as f64 / n as f64;
+                (centre.0 + half.0 * a.cos(), centre.1 + half.1 * a.sin())
+            }),
+        )
+    }
+
+    fn triangles(fm: &FaceMesh, polys: &Polylines) -> Vec<[[f64; 3]; 3]> {
+        let pt = |r: VRef| match r {
+            VRef::Edge { edge, i } => polys[&edge][i],
+            VRef::Inner(i) => fm.inner[i],
+        };
+        fm.tris.iter().map(|t| t.map(pt)).collect()
+    }
+
+    #[test]
+    fn hemisphere_bounded_by_a_meridian_circle() {
+        // A great circle through both poles: its samples pass a hair from each pole, where u
+        // jumps by half a turn and either way round closes the loop. The loop's direction picks
+        // the hemisphere, the one on its left seen from outside.
+        let r = 5.0;
+        for side in [1.0, -1.0] {
+            let tilt = 0.3f64;
+            let circle =
+                Frame::new([0.0; 3], [side, 0.0, 0.0], [0.0, tilt.cos(), tilt.sin()]).unwrap();
+            let at = |a: f64| circle.to_world([r * a.cos(), r * a.sin(), 0.0]);
+            let mut polys = Polylines::new();
+            let mut list = Vec::new();
+            for k in 0..3u64 {
+                let (a, b) = (TAU * k as f64 / 3.0, TAU * (k + 1) as f64 / 3.0);
+                let e = Edge {
+                    curve: Curve::Circle {
+                        frame: circle.clone(),
+                        r,
+                    },
+                    start: at(a),
+                    end: at(b),
+                    start_vertex: 100 + k,
+                    end_vertex: 100 + (k + 1) % 3,
+                    same_sense: true,
+                };
+                polys.insert(k + 1, discretize_edge(&e, &Options::default()).unwrap());
+                list.push((k + 1, true));
+            }
+            let face = Face {
+                id: 1,
+                surface: Surface::Sphere { frame: frame(), r },
+                same_sense: true,
+                outer: Some(0),
+                loops: vec![(Loop::Edges(list), true)],
+            };
+            let fm = tessellate_face(&face, &polys, &Options::default()).unwrap();
+            let half = TAU * r * r;
+            let got = area(&fm, &polys);
+            assert!((got - half).abs() < 1e-3 * half, "{got} vs {half}");
+            for [a, b, c] in triangles(&fm, &polys) {
+                let m = [
+                    (a[0] + b[0] + c[0]) / 3.0,
+                    (a[1] + b[1] + c[1]) / 3.0,
+                    (a[2] + b[2] + c[2]) / 3.0,
+                ];
+                assert!(side * m[0] > -1e-6, "side {side}: triangle at {m:?}");
+                let (u, v) = (
+                    [b[0] - a[0], b[1] - a[1], b[2] - a[2]],
+                    [c[0] - a[0], c[1] - a[1], c[2] - a[2]],
+                );
+                let n = [
+                    u[1] * v[2] - u[2] * v[1],
+                    u[2] * v[0] - u[0] * v[2],
+                    u[0] * v[1] - u[1] * v[0],
+                ];
+                assert!(
+                    n[0] * m[0] + n[1] * m[1] + n[2] * m[2] >= 0.0,
+                    "faces inward at {m:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn holes_in_a_helical_strip_lie_at_their_turn() {
+        // A strip winding four turns round a cylinder, with a hole at its first and at its last
+        // turn. At the angle of a hole the strip passes four times; only one turn holds it.
+        let (r, pitch, width, turns) = (5.0, 2.0, 1.0, 4.0);
+        let end = TAU * turns;
+        let lower = |t: f64| pitch * t / TAU;
+        let run = |from: f64, to: f64, dz: f64| {
+            let n = ((to - from).abs() / 0.02).ceil() as usize;
+            on_cylinder(
+                r,
+                (0..=n).map(move |k| {
+                    let t = from + (to - from) * k as f64 / n as f64;
+                    (t, lower(t) + dz)
+                }),
+            )
+        };
+        let (half_t, half_z) = (0.05, 0.25);
+        let centres = [TAU * 0.6, TAU * 3.3].map(|t| (t, lower(t) + width / 2.0));
+        let polys = Polylines::from([
+            (1u64, run(0.0, end, 0.0)),
+            (
+                2,
+                on_cylinder(
+                    r,
+                    [(end, lower(end)), (end, lower(end) + width)].into_iter(),
+                ),
+            ),
+            (3, run(end, 0.0, width)),
+            (4, on_cylinder(r, [(0.0, width), (0.0, 0.0)].into_iter())),
+            (5, hole(r, centres[0], (half_t, half_z))),
+            (6, hole(r, centres[1], (half_t, half_z))),
+        ]);
+        let face = Face {
+            id: 1,
+            surface: Surface::Cylinder { frame: frame(), r },
+            same_sense: true,
+            outer: Some(0),
+            loops: vec![
+                (
+                    Loop::Edges(vec![(1, true), (2, true), (3, true), (4, true)]),
+                    true,
+                ),
+                (Loop::Edges(vec![(5, true)]), true),
+                (Loop::Edges(vec![(6, true)]), true),
+            ],
+        };
+        let fm = tessellate_face(&face, &polys, &Options::default()).unwrap();
+        let want = r * (width * end - 2.0 * PI * half_t * half_z);
+        let got = area(&fm, &polys);
+        assert!((got - want).abs() < 1e-4 * want, "{got} vs {want}");
+    }
+
+    #[test]
+    fn band_seam_winds_between_staggered_holes() {
+        // A cylinder band with two rows of holes, the second row in the gaps of the first: every
+        // straight seam from the bottom circle to the top one runs through a hole.
+        let (r, height) = (5.0, 10.0);
+        let circle = |z: f64, forward: bool| {
+            let n = 400;
+            on_cylinder(
+                r,
+                (0..=n).map(move |k| {
+                    let t = TAU * k as f64 / n as f64;
+                    (if forward { t } else { -t }, z)
+                }),
+            )
+        };
+        let mut polys = Polylines::from([(1u64, circle(0.0, true)), (2, circle(height, false))]);
+        let half = (0.35, 1.0);
+        for k in 0..6 {
+            let t = PI / 3.0 * k as f64;
+            polys.insert(10 + k, hole(r, (t, 3.0), half));
+            polys.insert(20 + k, hole(r, (t + PI / 6.0, 7.0), half));
+        }
+        let mut loops = vec![
+            (Loop::Edges(vec![(1, true)]), true),
+            (Loop::Edges(vec![(2, true)]), true),
+        ];
+        for k in 0..6 {
+            loops.push((Loop::Edges(vec![(10 + k, true)]), true));
+            loops.push((Loop::Edges(vec![(20 + k, true)]), true));
+        }
+        let face = Face {
+            id: 1,
+            surface: Surface::Cylinder { frame: frame(), r },
+            same_sense: true,
+            outer: None,
+            loops,
+        };
+        let fm = tessellate_face(&face, &polys, &Options::default()).unwrap();
+        // The holes are 64-gons in parameter space.
+        let gon = 32.0 * (TAU / 64.0).sin() * half.0 * half.1;
+        let want = r * (TAU * height - 12.0 * gon);
+        let got = area(&fm, &polys);
+        assert!((got - want).abs() < 1e-4 * want, "{got} vs {want}");
+    }
+
+    #[test]
+    fn lone_outer_bound_against_the_normal() {
+        // An outer bound running clockwise seen from the face's normal, as vertex blends on
+        // surfaces of revolution are written: its edges, shared with the neighbours, fix the
+        // side the triangles face.
+        let polys = Polylines::from([(
+            1u64,
+            vec![
+                [0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+            ],
+        )]);
+        let face = Face {
+            id: 1,
+            surface: Surface::Plane(frame()),
+            same_sense: true,
+            outer: Some(0),
+            loops: vec![(Loop::Edges(vec![(1, true)]), true)],
+        };
+        let fm = tessellate_face(&face, &polys, &Options::default()).unwrap();
+        for [a, b, c] in triangles(&fm, &polys) {
+            let z = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+            assert!(z < 0.0, "triangle {a:?} {b:?} {c:?} faces +z");
+        }
+    }
 }
 
 #[test]
