@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 (unreleased)
+## 0.1.0 (2026-11-03)
 
 First release: STEP (ISO 10303-21) files to closed, oriented triangle meshes in millimetres.
 
