@@ -8,9 +8,9 @@
 //! wrong; reported as "reference disputed", never as ok).
 //! A file passes when stepmesh returns an error, or returns solids whose count matches, whose
 //! bounds are within 0.1 % of the diagonal (or the deflections of both meshes on small parts),
-//! and whose volume is within 0.1 % of OpenCascade's own
-//! mesh at the same tolerances or within max(0.1 %, deflection x area) of its exact B-rep volume (a
-//! mesh within the deflection of the surface cannot be closer than that). Anything else read
+//! and whose volume is within 0.1 % of OpenCascade's own mesh at the same tolerances or within
+//! max(0.1 %, deflection x area) of its exact B-rep volume (a mesh within the deflection of the
+//! surface cannot be closer than that). Anything else read
 //! without an error is WRONG; the gate allows none, and no panic or timeout either. The share of
 //! files within 0.1 % of the exact volume is reported separately.
 

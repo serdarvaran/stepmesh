@@ -5,6 +5,7 @@ description = "Pure Rust STEP (ISO 10303-21) reader that turns B-rep solids into
 keywords = ["step", "cad", "mesh", "brep", "tessellation"]
 categories = ["parser-implementations", "graphics", "science"]
 readme = "../README.md"
+repository = "https://github.com/serdarvaran/stepmesh"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

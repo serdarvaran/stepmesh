@@ -30,7 +30,7 @@ pub struct Nurbs2 {
 }
 
 /// Knot span index containing `u` (A2.1); `n` is the last control point index.
-fn find_span(n: usize, p: usize, u: f64, k: &[f64]) -> usize {
+pub(super) fn find_span(n: usize, p: usize, u: f64, k: &[f64]) -> usize {
     if u >= k[n + 1] {
         // the end of the range belongs to the last non-empty span
         let mut s = n;

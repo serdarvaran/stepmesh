@@ -1,5 +1,6 @@
 //! Curve and surface evaluation.
 
+pub(crate) mod bounds;
 mod curve;
 mod nurbs;
 mod surface;

@@ -49,7 +49,7 @@ impl Default for Options {
 #[doc(hidden)]
 pub mod internals {
     pub use crate::geom::{Curve, Nurbs1, Nurbs2, Surface, expand_knots};
-    pub use crate::mesh::{FaceMesh, VRef, discretize_edge, tessellate_face};
+    pub use crate::mesh::{FaceMesh, VRef, discretize_edge, edge_polylines, tessellate_face};
     pub use crate::model::{
         Brep, Edge, Face, Frame, Instance, Loop, Model, P3, Part, Shell, Transform, Units,
         decode_brep, decode_curve, decode_model, decode_surface,

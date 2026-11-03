@@ -3,6 +3,15 @@ use std::f64::consts::{FRAC_1_SQRT_2, TAU};
 use stepmesh::Options;
 use stepmesh::internals::{Curve, Edge, Frame, Nurbs1, discretize_edge, expand_knots};
 
+/// How `read_step` samples the edges of a spline face: with half the deflection.
+fn spline_edge_options() -> Options {
+    let o = Options::default();
+    Options {
+        linear_deflection: o.linear_deflection / 2.,
+        ..o
+    }
+}
+
 const DEFLECTION: f64 = 0.003;
 
 fn dist(a: [f64; 3], b: [f64; 3]) -> f64 {
@@ -197,7 +206,7 @@ mod faces {
     use super::*;
     use std::collections::HashMap;
     use stepmesh::internals::{
-        Brep, FaceMesh, Surface, VRef, decode_brep, decode_model, tessellate_face,
+        Brep, FaceMesh, Surface, VRef, decode_brep, decode_model, edge_polylines, tessellate_face,
     };
 
     struct Meshed {
@@ -233,11 +242,7 @@ mod faces {
             .flat_map(|p| &p.breps)
             .map(|&(id, units)| {
                 let brep = decode_brep(&x, id, units).unwrap();
-                let polys: HashMap<u64, Vec<[f64; 3]>> = brep
-                    .edges
-                    .iter()
-                    .map(|(&k, e)| (k, discretize_edge(e, &o).unwrap()))
-                    .collect();
+                let polys = edge_polylines(&brep, &o).unwrap();
                 let mut faces = Vec::new();
                 for (si, s) in brep.shells.iter().enumerate() {
                     for (fi, f) in s.faces.iter().enumerate() {
@@ -919,7 +924,7 @@ mod seamless {
                 end_vertex: id,
                 same_sense: true,
             };
-            polys.insert(id, discretize_edge(&e, &Options::default()).unwrap());
+            polys.insert(id, discretize_edge(&e, &spline_edge_options()).unwrap());
             loops.push((Loop::Edges(vec![(id, true)]), true));
         }
         let face = Face {
@@ -1098,7 +1103,7 @@ mod seamless {
                 end_vertex: id,
                 same_sense: true,
             };
-            polys.insert(id, discretize_edge(&e, &Options::default()).unwrap());
+            polys.insert(id, discretize_edge(&e, &spline_edge_options()).unwrap());
             loops.push((Loop::Edges(vec![(id, true)]), true));
         }
         let face = Face {
@@ -1186,7 +1191,7 @@ mod seamless {
                 end_vertex: id,
                 same_sense: true,
             };
-            polys.insert(id, discretize_edge(&e, &Options::default()).unwrap());
+            polys.insert(id, discretize_edge(&e, &spline_edge_options()).unwrap());
             loops.push((Loop::Edges(vec![(id, true)]), true));
         }
         let face = Face {

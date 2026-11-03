@@ -16,26 +16,15 @@ pub fn discretize_edge(e: &Edge, o: &Options) -> Result<Vec<P3>, Error> {
         Curve::Line { .. } => vec![t_start, t_end],
         Curve::Circle { r, .. } => uniform(t_start, t_end, *r, o)?,
         Curve::Ellipse { a, b, .. } => uniform(t_start, t_end, a.max(*b), o)?,
-        Curve::Nurbs(_) => {
-            let (lo, hi) = (t_start.min(t_end), t_start.max(t_end));
-            let mut cuts: Vec<f64> = e
-                .curve
-                .breaks()
-                .into_iter()
-                .filter(|&k| k > lo && k < hi)
-                .collect();
-            if t_end < t_start {
-                cuts.reverse();
-            }
-            sample_curve(&|t| e.curve.derivs(t), t_start, t_end, &cuts, o)
-        }
+        Curve::Nurbs(n) => crate::geom::bounds::sample_nurbs(n, t_start, t_end, o)?,
     };
     if ts.len() < 2 {
         ts = vec![t_start, t_end];
     }
     // Interior samples that coincide with a neighbour (a knot cut a hair from an end) are
     // dropped: two mesh vertices at one place would leave a gap between the faces.
-    let same = |a: P3, b: P3| norm(sub(a, b)) <= 1e-9 * (1.0 + norm(a));
+    let same =
+        |a: P3, b: P3| norm(sub(a, b)) <= (1e-9 * (1.0 + norm(a))).min(0.25 * o.linear_deflection);
     let mut pts = vec![e.start];
     for &t in &ts[1..ts.len() - 1] {
         let p = e.curve.point(t);
@@ -103,14 +92,30 @@ pub(crate) fn sample_curve(
     b: f64,
     cuts: &[f64],
     o: &Options,
-) -> Vec<f64> {
+) -> Result<Vec<f64>, Error> {
     let mut out = vec![a];
     let mut from = a;
     for &t in cuts.iter().chain([&b]) {
-        adaptive(c, from, t, o, 0, &mut out);
+        let da = c(from + (t - from) * 1e-8).1;
+        let db = c(t + (from - t) * 1e-8).1;
+        // At a C0 knot the next piece has a different tangent; use this piece's side.
+        let piece = |x| {
+            let (p, d) = c(x);
+            (
+                p,
+                if x == from {
+                    da
+                } else if x == t {
+                    db
+                } else {
+                    d
+                },
+            )
+        };
+        adaptive(&piece, from, t, o, 0, &mut out)?;
         from = t;
     }
-    out
+    Ok(out)
 }
 
 /// Appends the parameters after `a` up to and including `b`, bisecting where the curve leaves
@@ -122,7 +127,13 @@ fn adaptive(
     o: &Options,
     depth: usize,
     out: &mut Vec<f64>,
-) {
+) -> Result<(), Error> {
+    if out.len() >= MAX_EDGE_SAMPLES {
+        return Err(Error::TriangleLimit {
+            count: out.len() + 1,
+            limit: MAX_EDGE_SAMPLES,
+        });
+    }
     let (pa, da) = c(a);
     let (pb, db) = c(b);
     let chord = sub(pb, pa);
@@ -149,11 +160,18 @@ fn adaptive(
     } else {
         0.0
     };
-    if depth < MAX_DEPTH && (deviation > o.linear_deflection || turn > o.angular_deflection) {
+    if deviation > o.linear_deflection || turn > o.angular_deflection {
         let m = 0.5 * (a + b);
-        adaptive(c, a, m, o, depth + 1, out);
-        adaptive(c, m, b, o, depth + 1, out);
+        if depth == MAX_DEPTH || m == a || m == b {
+            return Err(Error::Invalid {
+                id: 0,
+                msg: "surface seam does not reach the tolerances".into(),
+            });
+        }
+        adaptive(c, a, m, o, depth + 1, out)?;
+        adaptive(c, m, b, o, depth + 1, out)?;
     } else {
         out.push(b);
     }
+    Ok(())
 }

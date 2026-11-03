@@ -142,7 +142,11 @@ pub(crate) fn dist2(a: P3, b: P3) -> f64 {
 
 /// Distinct knots strictly inside `range`, ascending.
 pub(crate) fn interior_knots(knots: &[f64], (lo, hi): (f64, f64)) -> Vec<f64> {
-    let mut out: Vec<f64> = knots.iter().copied().filter(|&k| k > lo && k < hi).collect();
+    let mut out: Vec<f64> = knots
+        .iter()
+        .copied()
+        .filter(|&k| k > lo && k < hi)
+        .collect();
     out.dedup();
     out
 }

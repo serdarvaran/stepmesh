@@ -30,9 +30,10 @@ for solid in &mesh.solids {
   normals of neighbouring vertices within `angular_deflection` (default 0.5 rad) except across a
   crease of the surface itself (a B-spline's C0 knot line), where no refinement can bring them
   closer.
-- A file this crate cannot mesh faithfully fails with an [`Error`] naming the reason (unsupported
-  entity, open shell, a face that cannot be laid out in its parameter space, a face whose mesh does
-  not reach the tolerances, a mesh that would not close). It never returns an approximate or
+- A file this crate cannot mesh faithfully fails with an `Error` naming the reason (unsupported
+  entity, open shell, a face that cannot be laid out in its parameter space, a boundary farther
+  from its face than the deflection, a face whose mesh does not reach the tolerances, a mesh that
+  would not close). It never returns an approximate or
   partial result.
 
 ## Supported entities
@@ -61,10 +62,13 @@ projected onto the surface, kept continuous across periodic seams, poles and api
 along their parameter row, and loops that go round a closed surface without a seam are closed
 through the pole or joined into a band, along a seam that winds between holes where no straight
 one passes. The region is triangulated with constraints on the boundary and refined where the
-surface leaves the triangles by more than the deflection. Edges whose polylines cross in a face's
-parameter space (two curves closer than the tolerance) are sampled again, finer; a plane face
-whose boundary still overlaps itself is cut into ears, which keeps its signed area. The result is
-checked: a solid whose mesh is not closed and consistently oriented is an error.
+surface leaves the triangles by more than the deflection. On B-spline, swept and offset faces
+that distance is bounded, not sampled: by the control hulls of the surface's rational Bézier
+pieces and by Taylor bounds on its second derivatives (of its unit normal, for an offset). Edges
+whose polylines cross in a face's parameter space (two curves closer than the tolerance) are
+sampled again, finer; a plane face whose boundary still overlaps itself is cut into ears, which
+keeps its signed area. The result is checked: a solid whose mesh is not closed and consistently
+oriented is an error.
 
 ## Testing
 
@@ -75,8 +79,11 @@ checked: a solid whose mesh is not closed and consistently oriented is an error.
   within 0.1 % of OpenCascade's mesh at the same tolerances or of its exact B-rep volume (allowing
   the deflection times the area). Any result outside that is a failure, as is a panic or timeout.
 - On the CAx-IF test files shipped with occt-import-js 0.0.23, of the 44 files OpenCascade reads,
-  43 match; the remaining one is a file OpenCascade misreads (its rim plane puts the material on
-  the other side; the same part from another exporter reads as stepmesh reads it).
+  40 match and 4 fail with an explicit error: their edges lie farther from their faces than the
+  default deflection.
+- On 1000 files of the ABC dataset, 959 match, 5 have an OpenCascade reference shown to be wrong
+  and 36 fail with an explicit error (mostly edges farther from their faces than the deflection).
+  None is read wrong.
 
 ## License
 

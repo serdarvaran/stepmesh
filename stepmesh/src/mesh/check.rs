@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::model::{P3, cross, dot};
+use crate::model::{P3, cross, dot, sub};
 
 /// Every directed edge is used once and its reverse once: a closed, consistently oriented
 /// 2-manifold surface (possibly touching itself at vertices).
@@ -23,9 +23,13 @@ pub fn closed_oriented(tris: &[[u32; 3]]) -> bool {
 
 /// Volume enclosed by counter-clockwise (outward facing) triangles.
 pub fn signed_volume(positions: &[P3], tris: &[[u32; 3]]) -> f64 {
+    let Some(first) = tris.first() else {
+        return 0.0;
+    };
+    let origin = positions[first[0] as usize];
     tris.iter()
         .map(|t| {
-            let [a, b, c] = t.map(|i| positions[i as usize]);
+            let [a, b, c] = t.map(|i| sub(positions[i as usize], origin));
             dot(a, cross(b, c))
         })
         .sum::<f64>()

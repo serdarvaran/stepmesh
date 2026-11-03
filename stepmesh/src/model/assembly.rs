@@ -93,7 +93,7 @@ pub fn decode_model(x: &Exchange) -> Result<Model, Error> {
     } else {
         b.product_roots()?
     };
-    let model = Model {
+    let mut model = Model {
         parts: b.parts,
         roots,
     };
@@ -122,6 +122,10 @@ pub fn decode_model(x: &Exchange) -> Result<Model, Error> {
             None => Err(Error::NoGeometry),
         };
     }
+    for part in &mut model.parts {
+        part.children.retain(|child| counts[child.part] != 0);
+    }
+    model.roots.retain(|root| counts[root.part] != 0);
     Ok(model)
 }
 
@@ -134,6 +138,7 @@ fn solid_counts(m: &Model) -> Result<Vec<u64>, Error> {
         depth: usize,
         state: &mut [u8],
         counts: &mut [u64],
+        heights: &mut [usize],
     ) -> Result<u64, Error> {
         match state[part] {
             2 => return Ok(counts[part]),
@@ -153,17 +158,27 @@ fn solid_counts(m: &Model) -> Result<Vec<u64>, Error> {
         }
         state[part] = 1;
         let mut n = m.parts[part].breps.len() as u64;
+        let mut height = 0;
         for c in &m.parts[part].children {
-            n = n.saturating_add(visit(m, c.part, depth + 1, state, counts)?);
+            n = n.saturating_add(visit(m, c.part, depth + 1, state, counts, heights)?);
+            height = height.max(heights[c.part] + 1);
+            if height > MAX_ASSEMBLY_DEPTH {
+                return Err(Error::Invalid {
+                    id: 0,
+                    msg: "assembly nested too deeply".into(),
+                });
+            }
         }
         state[part] = 2;
         counts[part] = n;
+        heights[part] = height;
         Ok(n)
     }
     let mut state = vec![0u8; m.parts.len()];
     let mut counts = vec![0u64; m.parts.len()];
+    let mut heights = vec![0usize; m.parts.len()];
     for p in 0..m.parts.len() {
-        visit(m, p, 0, &mut state, &mut counts)?;
+        visit(m, p, 0, &mut state, &mut counts, &mut heights)?;
     }
     Ok(counts)
 }
@@ -304,7 +319,15 @@ impl Builder<'_> {
             let name = e.records[0].name.as_str();
             if has(&SOLID_ITEMS).is_some() {
                 // A solid listed by two linked representations is one solid.
-                if !self.parts[part].breps.iter().any(|&(b, _)| b == item) {
+                if let Some(&(_, previous)) =
+                    self.parts[part].breps.iter().find(|&&(b, _)| b == item)
+                {
+                    if previous != units {
+                        return self
+                            .d
+                            .invalid(item, "linked representations disagree on solid units");
+                    }
+                } else {
                     self.parts[part].breps.push((item, units));
                 }
             } else if has(&SURFACE_ITEMS).is_some() {
@@ -434,28 +457,37 @@ impl Builder<'_> {
             uses.push((nauo, parent, child));
         }
         let placements = self.occurrence_placements()?;
+        let mut remaining_mapped: HashMap<usize, Vec<Instance>> = HashMap::new();
         for (nauo, parent, child) in uses {
             let p = self.part(Key::Product(parent))?;
             let c = self.part(Key::Product(child))?;
-            let transform = match placements.get(&nauo) {
-                Some(&rel) => self.relationship_transform(rel, child)?,
-                // Placed by a MAPPED_ITEM of the parent instead, or not at all.
-                None if self.parts[p].children.iter().any(|i| i.part == c) => continue,
-                None => Transform::identity(),
-            };
+            let transform = placements
+                .get(&nauo)
+                .map(|&rel| self.relationship_transform(rel, child))
+                .transpose()?;
             self.uses.push((nauo, c));
-            // The same occurrence placed by a MAPPED_ITEM as well is one instance.
+            let mapped = remaining_mapped
+                .entry(p)
+                .or_insert_with(|| self.parts[p].children.clone());
+            // A mapped placement can account for only one product occurrence.
             let same = |i: &Instance| {
                 i.part == c
-                    && i.transform
-                        .m
-                        .iter()
-                        .flatten()
-                        .zip(transform.m.iter().flatten())
-                        .all(|(a, b)| (a - b).abs() < 1e-9)
+                    && transform.as_ref().is_none_or(|transform| {
+                        i.transform
+                            .m
+                            .iter()
+                            .flatten()
+                            .zip(transform.m.iter().flatten())
+                            .all(|(a, b)| (a - b).abs() < 1e-9)
+                    })
             };
-            if !self.parts[p].children.iter().any(same) {
-                self.parts[p].children.push(Instance { part: c, transform });
+            if let Some(i) = mapped.iter().position(same) {
+                mapped.swap_remove(i);
+            } else {
+                self.parts[p].children.push(Instance {
+                    part: c,
+                    transform: transform.unwrap_or_else(Transform::identity),
+                });
             }
         }
         let mut roots = Vec::new();
@@ -547,19 +579,7 @@ impl Builder<'_> {
             .collect();
         reps.sort_unstable();
         for rep in reps.into_iter().filter(|r| !mapped.contains(r)) {
-            let holds_solid = self
-                .d
-                .references(rep, self.d.first(rep)?.params.get(1))
-                .is_ok_and(|items| {
-                    items.iter().any(|&i| {
-                        self.d.entity(i).is_ok_and(|e| {
-                            e.records.iter().any(|r| {
-                                SOLID_ITEMS.contains(&r.name.as_str()) || r.name == "MAPPED_ITEM"
-                            })
-                        })
-                    })
-                });
-            if holds_solid {
+            if matches!(self.d.first(rep)?.params.get(1), Some(Value::List(_))) {
                 let part = self.part(Key::Representation(rep))?;
                 roots.push(Instance {
                     part,

@@ -1,11 +1,12 @@
 //! One B-rep solid as a closed, oriented triangle mesh.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::edges::discretize_edge;
 use super::face::{FaceMesh, VRef, clip_ears, tessellate};
 use crate::fxhash::FxMap;
 use crate::geom::Surface;
+use crate::geom::bounds::has_spline;
 use crate::model::{Brep, Face, Loop, P3, cross, dot, norm, sub};
 use crate::{Error, Options};
 
@@ -96,16 +97,53 @@ pub fn mesh_brep(
     })
 }
 
+/// Edges of spline faces. Such a face's certified bound includes its boundary chords, which the
+/// face cannot refine: their edges leave it half the deflection.
+fn spline_edges(b: &Brep) -> HashSet<u64> {
+    b.shells
+        .iter()
+        .flat_map(|s| &s.faces)
+        .filter(|f| has_spline(&f.surface))
+        .flat_map(|f| &f.loops)
+        .filter_map(|(l, _)| match l {
+            Loop::Edges(list) => Some(list.iter().map(|&(e, _)| e)),
+            _ => None,
+        })
+        .flatten()
+        .collect()
+}
+
+/// Sampling options of an edge, `level` times made finer.
+fn edge_options(o: &Options, on_spline: bool, level: u32) -> Options {
+    let share = if on_spline { 2. } else { 1. };
+    Options {
+        linear_deflection: o.linear_deflection / (share * f64::from(1u32 << level)),
+        ..o.clone()
+    }
+}
+
+/// The polyline of every edge of `b`, sampled as its faces need.
+pub fn edge_polylines(b: &Brep, o: &Options) -> Result<Polylines, Error> {
+    let spline = spline_edges(b);
+    b.edges
+        .iter()
+        .map(|(&id, e)| {
+            Ok((
+                id,
+                discretize_edge(e, &edge_options(o, spline.contains(&id), 0))?,
+            ))
+        })
+        .collect()
+}
+
 /// Edge polylines and the mesh of every face, in shell order. Edges sampled to the tolerances
 /// can still cross in a face's parameter space where two curves run closer than the tolerance
 /// (a wall thinner than it, a face narrower than it): such edges are sampled again, finer, and
 /// the faces using them meshed again.
 fn mesh_faces(b: &Brep, o: &Options) -> Result<(Polylines, Vec<FaceMesh>), Error> {
-    let mut polys = HashMap::with_capacity(b.edges.len());
-    for (&id, e) in &b.edges {
-        polys.insert(id, discretize_edge(e, o)?);
-    }
     let faces: Vec<&Face> = b.shells.iter().flat_map(|s| &s.faces).collect();
+    let spline = spline_edges(b);
+    let mut polys = edge_polylines(b, o)?;
     let mut meshes: Vec<Option<FaceMesh>> = vec![None; faces.len()];
     let mut refinements: HashMap<u64, u32> = HashMap::new();
     // Faces before `next` are meshed.
@@ -139,11 +177,13 @@ fn mesh_faces(b: &Brep, o: &Options) -> Result<(Polylines, Vec<FaceMesh>), Error
         for &id in &crossing {
             let level = refinements.entry(id).or_default();
             *level += 1;
-            let finer = Options {
-                linear_deflection: o.linear_deflection / f64::from(1u32 << *level),
-                ..o.clone()
-            };
-            polys.insert(id, discretize_edge(&b.edges[&id], &finer)?);
+            polys.insert(
+                id,
+                discretize_edge(
+                    &b.edges[&id],
+                    &edge_options(o, spline.contains(&id), *level),
+                )?,
+            );
         }
         for (j, f) in faces.iter().enumerate() {
             let uses = f.loops.iter().any(|(l, _)| match l {

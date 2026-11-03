@@ -10,6 +10,7 @@ use super::param::Param;
 use super::seam::{free_param, nearest_along_u, restart_at, seam_pair, seam_route, seam_start};
 use crate::fxhash::FxSet;
 use crate::geom::Surface;
+use crate::geom::bounds::NormalBounds;
 use crate::model::{Face, Loop, P3, add, dot, mul, norm, sub};
 use crate::{Error, Options};
 
@@ -33,9 +34,6 @@ const COLLAPSED: f64 = 1e-5;
 const POLE_JUMP: f64 = 0.25;
 /// Most copies of one pole along its parameter row.
 const MAX_POLE_COPIES: usize = 64;
-/// A boundary point may lie this far from the face's surface: files carry edge curves that
-/// leave their faces by their modelling tolerance (0.08 mm seen in CAx-IF test data).
-const ON_SURFACE: f64 = 0.1;
 
 /// A mesh vertex: a sample of an edge polyline (shared with the neighbouring face) or a point
 /// of this face only.
@@ -71,6 +69,7 @@ struct Ctx<'a> {
     inner: Vec<P3>,
     /// Edges whose polylines cross in parameter space, when they do.
     crossing: Vec<u64>,
+    normal_bounds: NormalBounds,
 }
 
 pub fn tessellate_face(
@@ -99,6 +98,7 @@ pub(super) fn tessellate(
         o,
         inner: Vec::new(),
         crossing: Vec::new(),
+        normal_bounds: NormalBounds::default(),
     };
     let mut c = ctx(false);
     let mut loops = c.map_loops(edges).map_err(plain)?;
@@ -161,6 +161,7 @@ pub(super) fn clip_ears(
         o,
         inner: Vec::new(),
         crossing: Vec::new(),
+        normal_bounds: NormalBounds::default(),
     };
     let crossing = || c.fail("the boundary crosses itself in parameter space");
     let loops = c.map_loops(edges)?;
@@ -316,7 +317,8 @@ impl Ctx<'_> {
                 .s
                 .project(p, hint)
                 .ok_or_else(|| self.fail("projection onto the surface did not converge"))?;
-            if norm(sub(self.s.point(q.0, q.1), p)) > ON_SURFACE {
+            let distance = norm(sub(self.s.point(q.0, q.1), p));
+            if !distance.is_finite() || distance > self.o.linear_deflection {
                 return Err(self.fail("a boundary point lies off the surface"));
             }
             sing[i] = self.singular(q);
@@ -479,7 +481,7 @@ impl Ctx<'_> {
                 if da.signum() == db.signum() {
                     return Err(self.fail("two loops go round the surface the same way"));
                 }
-                let band = self.join_band(a, da, b, db, &plain);
+                let band = self.join_band(a, da, b, db, &plain)?;
                 plain.push(band);
             }
             _ => return Err(self.fail("more than two loops go round the surface")),
@@ -509,7 +511,7 @@ impl Ctx<'_> {
         let pole_r = self.new_inner(pole_p);
         // The meridian from the loop to the pole is a seam inside the face: sampled once, its
         // points stand on both sides.
-        let seam = self.seam_points(first.uv, (first.uv.0, v));
+        let seam = self.seam_points(first.uv, (first.uv.0, v))?;
         l.push(BPoint {
             uv: (end, first.uv.1),
             ..first
@@ -545,7 +547,7 @@ impl Ctx<'_> {
         mut b: Vec<BPoint>,
         db: f64,
         holes: &[Vec<BPoint>],
-    ) -> Vec<BPoint> {
+    ) -> Result<Vec<BPoint>, Error> {
         if let Some(pv) = self.s.period().1 {
             let mean_v = |l: &[BPoint]| l.iter().map(|p| p.uv.1).sum::<f64>() / l.len() as f64;
             let gap = (mean_v(&a) - mean_v(&b)) / pv;
@@ -587,7 +589,7 @@ impl Ctx<'_> {
         };
         let end = route[route.len() - 1];
         let shift = ((end.0 + da - b[k].uv.0) / period).round() * period;
-        let seam = self.route_points(&route);
+        let seam = self.route_points(&route)?;
         let mut out = a.clone();
         out.push(BPoint {
             uv: (a[0].uv.0 + da, a[0].uv.1),
@@ -607,12 +609,12 @@ impl Ctx<'_> {
             });
         }
         out.extend(seam.iter().rev().copied());
-        out
+        Ok(out)
     }
 
     /// Points of a seam along the straight parameter lines between its corners, the inner
     /// corners included (new face vertices).
-    fn route_points(&mut self, route: &[(f64, f64)]) -> Vec<BPoint> {
+    fn route_points(&mut self, route: &[(f64, f64)]) -> Result<Vec<BPoint>, Error> {
         let mut out = Vec::new();
         for (k, w) in route.windows(2).enumerate() {
             if k > 0 {
@@ -625,17 +627,17 @@ impl Ctx<'_> {
                     pole: false,
                 });
             }
-            out.extend(self.seam_points(w[0], w[1]));
+            out.extend(self.seam_points(w[0], w[1])?);
         }
-        out
+        Ok(out)
     }
 
     /// Points strictly between two parameter points, along the straight line joining them, at
     /// the edge tolerances (new face vertices).
-    fn seam_points(&mut self, from: (f64, f64), to: (f64, f64)) -> Vec<BPoint> {
+    fn seam_points(&mut self, from: (f64, f64), to: (f64, f64)) -> Result<Vec<BPoint>, Error> {
         let at = |t: f64| (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t);
-        let ts = self.segment_params(from, to);
-        ts[1..ts.len() - 1]
+        let ts = self.segment_params(from, to)?;
+        Ok(ts[1..ts.len() - 1]
             .iter()
             .map(|&t| {
                 let uv = at(t);
@@ -648,12 +650,12 @@ impl Ctx<'_> {
                     pole: false,
                 }
             })
-            .collect()
+            .collect())
     }
 
     /// Parameters (0 to 1) along the straight parameter line from `from` to `to` at the edge
     /// tolerances, starting from where it crosses the surface's knot lines.
-    fn segment_params(&self, from: (f64, f64), to: (f64, f64)) -> Vec<f64> {
+    fn segment_params(&self, from: (f64, f64), to: (f64, f64)) -> Result<Vec<f64>, Error> {
         let s = self.s;
         let (period, breaks) = (s.period(), s.breaks());
         let mut cuts = Vec::new();
@@ -689,7 +691,9 @@ impl Ctx<'_> {
             let (p, su, sv) = s.derivs(u, v);
             (p, add(mul(su, to.0 - from.0), mul(sv, to.1 - from.1)))
         };
-        sample_curve(&curve, 0.0, 1.0, &cuts, self.o)
+        let mut options = self.o.clone();
+        options.linear_deflection *= 0.5;
+        sample_curve(&curve, 0.0, 1.0, &cuts, &options)
     }
 
     /// Shifts every loop by whole periods next to the one with the widest parameter range.
@@ -790,13 +794,13 @@ impl Ctx<'_> {
                 .map(|i| u0 + (u1 - u0) * i as f64 / n as f64)
                 .collect()
         } else {
-            self.segment_params((u0, v0), (u1, v0))
+            self.segment_params((u0, v0), (u1, v0))?
                 .iter()
                 .map(|t| u0 + (u1 - u0) * t)
                 .collect()
         };
         let vs: Vec<f64> = self
-            .segment_params((u0, v0), (u0, v1))
+            .segment_params((u0, v0), (u0, v1))?
             .iter()
             .map(|t| v0 + (v1 - v0) * t)
             .collect();
@@ -873,7 +877,9 @@ impl Ctx<'_> {
                 .map_err(|_| Ctx::error(face, "a parameter point cannot be triangulated"))?;
             if h.index() == info.len() {
                 info.push(b);
-            } else if info[h.index()].r != b.r && norm(sub(info[h.index()].p, b.p)) > ON_SURFACE {
+            } else if info[h.index()].r != b.r
+                && norm(sub(info[h.index()].p, b.p)) > self.o.linear_deflection
+            {
                 return Err(Ctx::error(face, "two boundary points share parameters"));
             }
             Ok(h)
@@ -981,6 +987,20 @@ impl Ctx<'_> {
             if a == b || b == c || a == c {
                 continue; // collapsed onto a pole or apex
             }
+            let v = face.vertices().map(|h| info[h.fix().index()]);
+            let mut key = face.vertices().map(|h| h.fix().index() as u32);
+            key.sort_unstable();
+            if !checked.triangles.contains(&key)
+                && self.s.triangle_within(
+                    v.map(|b| b.uv),
+                    v.map(|b| b.p),
+                    self.o,
+                    &self.normal_bounds,
+                ) == Some(false)
+                && !self.s.fan_within(v.map(|b| b.uv), v.map(|b| b.p), self.o)
+            {
+                return Err(self.fail("the spline mesh does not reach the tolerances"));
+            }
             tris.push(if flip { [a, c, b] } else { [a, b, c] });
         }
         Ok(FaceMesh {
@@ -1081,6 +1101,12 @@ impl Ctx<'_> {
                 (v[0].uv.1 + v[1].uv.1 + v[2].uv.1) / 3.0,
             );
             let p_c = mul(add(add(v[0].p, v[1].p), v[2].p), 1.0 / 3.0);
+            let certified = self.s.triangle_within(
+                v.map(|b| b.uv),
+                v.map(|b| b.p),
+                self.o,
+                &self.normal_bounds,
+            );
             let size = (0..3)
                 .map(|i| norm(sub(v[i].p, v[(i + 1) % 3].p)))
                 .fold(0.0, f64::max);
@@ -1096,7 +1122,19 @@ impl Ctx<'_> {
                 .map(|(x, y)| (x.x - y.x).powi(2) + (x.y - y.y).powi(2))
                 .fold(0.0, f64::max);
             if size <= self.o.linear_deflection || area <= FLAT * longest {
-                checked.triangles.insert(key);
+                // Refining these does not end: a thin one can still be measured against the
+                // nearest surface point; an uncertified one fails the final check.
+                if certified != Some(false)
+                    || self.s.fan_within(v.map(|b| b.uv), v.map(|b| b.p), self.o)
+                {
+                    checked.triangles.insert(key);
+                }
+                continue;
+            }
+            if certified == Some(false) {
+                // The centroid alone: splitting the sides as well overshoots the tolerance
+                // several times over.
+                out.push((uv_c, face.vertices()[0].fix()));
                 continue;
             }
             let near = self.near_surface(p_c, uv_c, size);

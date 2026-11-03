@@ -132,6 +132,16 @@ impl Decoder<'_> {
         if !ordered || n <= p || k[p] >= k[n] {
             return self.invalid(id, "knots not increasing over the parameter range");
         }
+        let mut run = 1;
+        for i in 1..k.len() {
+            run = if k[i] == k[i - 1] { run + 1 } else { 1 };
+            if k[i] > k[p] && k[i] < k[n] && run > p {
+                return self.invalid(
+                    id,
+                    "interior knot multiplicity makes the spline discontinuous",
+                );
+            }
+        }
         Ok(())
     }
 
@@ -172,6 +182,9 @@ impl Decoder<'_> {
         p: usize,
     ) -> Result<Vec<f64>, Error> {
         let kind = form.name.as_str();
+        if p == 0 || n <= p {
+            return self.invalid(id, "invalid degree or too few control points");
+        }
         if kind.ends_with("_WITH_KNOTS") {
             let mults = self.integers(id, form.params.get(at))?;
             let ks = self.reals(id, form.params.get(at + offset))?;
@@ -183,9 +196,6 @@ impl Decoder<'_> {
             let knots = expand_knots(&mults, &ks);
             self.check_knots(id, &knots, n, p)?;
             return Ok(knots);
-        }
-        if n <= p {
-            return self.invalid(id, "fewer control points than the degree needs");
         }
         Ok(if kind.starts_with("UNIFORM") {
             (0..n + p + 1).map(|i| i as f64 - p as f64).collect()
@@ -223,6 +233,12 @@ impl Decoder<'_> {
     fn bspline_curve(&self, id: u64, units: Units) -> Result<Curve, Error> {
         let (base, form, off) = self.bspline_record(id, "B_SPLINE_CURVE", &CURVE_FORMS)?;
         let degree = self.integer(id, base.params.get(off))?;
+        if degree > MAX_DEGREE {
+            return Err(Error::Unsupported {
+                entity: format!("B-spline curve of degree {degree}"),
+                id,
+            });
+        }
         let pts = self.references(id, base.params.get(off + 1))?;
         let k0 = if off == 1 { 6 } else { 0 };
         let w = match self.weights(id, "RATIONAL_B_SPLINE_CURVE")? {
@@ -230,12 +246,6 @@ impl Decoder<'_> {
             None => vec![1.0; pts.len()],
         };
         let knots = self.knot_vector(id, form, k0, 1, pts.len(), degree)?;
-        if degree > MAX_DEGREE {
-            return Err(Error::Unsupported {
-                entity: format!("B-spline curve of degree {degree}"),
-                id,
-            });
-        }
         if degree == 0 || w.len() != pts.len() || knots.len() != pts.len() + degree + 1 {
             return self.invalid(id, "inconsistent B-spline curve");
         }

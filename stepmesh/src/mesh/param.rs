@@ -1,7 +1,9 @@
 //! A surface seen with its parameters in either order: the face code closes loops that go round
 //! along u, and meshes faces whose loops go round along v with u and v swapped.
 
+use crate::Options;
 use crate::geom::Surface;
+use crate::geom::bounds::NormalBounds;
 use crate::model::{P3, mul};
 
 #[derive(Clone, Copy)]
@@ -12,6 +14,23 @@ pub(super) struct Param<'a> {
 }
 
 impl Param<'_> {
+    pub fn triangle_within(
+        &self,
+        uv: [(f64, f64); 3],
+        pts: [P3; 3],
+        o: &Options,
+        cache: &NormalBounds,
+    ) -> Option<bool> {
+        crate::geom::bounds::triangle_within(self.surface, uv.map(|p| self.order(p)), pts, o, cache)
+    }
+    pub fn fan_within(&self, uv: [(f64, f64); 3], pts: [P3; 3], o: &Options) -> bool {
+        crate::geom::bounds::fan_within(
+            self.surface,
+            uv.map(|p| self.order(p)),
+            pts,
+            o.linear_deflection,
+        )
+    }
     fn order<T>(&self, (a, b): (T, T)) -> (T, T) {
         if self.swapped { (b, a) } else { (a, b) }
     }

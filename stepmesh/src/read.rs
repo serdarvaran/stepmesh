@@ -74,19 +74,20 @@ pub fn read_step(bytes: &[u8], options: &Options) -> Result<StepMesh, Error> {
     let d = Decoder::new(&x);
     let mut placed = Vec::new();
     for root in &model.roots {
-        collect(&model, root.part, &root.transform, &mut placed);
+        collect(&model, root.part, &root.transform, &mut placed)?;
     }
-    let mut cache: HashMap<u64, Rc<LocalMesh>> = HashMap::new();
+    let mut cache: HashMap<(u64, u64, u64), Rc<LocalMesh>> = HashMap::new();
     let mut out = StepMesh::default();
     let mut total = 0usize;
     for (solid, (brep, units, transform, name)) in placed.into_iter().enumerate() {
-        let local = match cache.get(&brep) {
+        let key = (brep, units.length_mm.to_bits(), units.angle_rad.to_bits());
+        let local = match cache.get(&key) {
             Some(m) => m.clone(),
             None => {
                 let b = d.brep(brep, units)?;
                 let budget = options.max_triangles.map(|l| l.saturating_sub(total));
                 let m = Rc::new(mesh_brep(&b, options, solid, budget)?);
-                cache.insert(brep, m.clone());
+                cache.insert(key, m.clone());
                 m
             }
         };
@@ -99,7 +100,7 @@ pub fn read_step(bytes: &[u8], options: &Options) -> Result<StepMesh, Error> {
                 });
             }
         }
-        out.solids.push(SolidMesh {
+        let mesh = SolidMesh {
             name,
             positions: local
                 .positions
@@ -107,14 +108,34 @@ pub fn read_step(bytes: &[u8], options: &Options) -> Result<StepMesh, Error> {
                 .map(|&p| transform.apply(p))
                 .collect(),
             triangles: local.triangles.clone(),
-        });
+        };
+        if mesh.positions.iter().flatten().any(|v| !v.is_finite()) {
+            return Err(Error::Invalid {
+                id: brep,
+                msg: "placed coordinate out of range".into(),
+            });
+        }
+        let volume = mesh.volume();
+        if !volume.is_finite() || volume <= 0.0 {
+            return Err(Error::Invalid {
+                id: brep,
+                msg: "placement collapses the solid or its volume is out of range".into(),
+            });
+        }
+        out.solids.push(mesh);
     }
     Ok(out)
 }
 
 type Placed = (u64, Units, Transform, Option<String>);
 
-fn collect(m: &Model, part: usize, t: &Transform, out: &mut Vec<Placed>) {
+fn collect(m: &Model, part: usize, t: &Transform, out: &mut Vec<Placed>) -> Result<(), Error> {
+    if t.m.iter().flatten().any(|v| !v.is_finite()) {
+        return Err(Error::Invalid {
+            id: 0,
+            msg: "assembly transformation out of range".into(),
+        });
+    }
     let p = &m.parts[part];
     out.extend(
         p.breps
@@ -122,6 +143,7 @@ fn collect(m: &Model, part: usize, t: &Transform, out: &mut Vec<Placed>) {
             .map(|&(id, units)| (id, units, t.clone(), p.name.clone())),
     );
     for c in &p.children {
-        collect(m, c.part, &t.compose(&c.transform), out);
+        collect(m, c.part, &t.compose(&c.transform), out)?;
     }
+    Ok(())
 }

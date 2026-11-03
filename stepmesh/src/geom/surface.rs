@@ -497,14 +497,65 @@ impl Surface {
         self.newton_within(p, start, self.param_bounds())
     }
 
+    /// Parameters of a surface point the descent towards `p` from `start` ends at, settled or
+    /// not: any surface point bounds the distance of `p` to the surface.
+    pub(super) fn approach(&self, p: P3, start: (f64, f64)) -> (f64, f64) {
+        self.descend(p, start, self.param_bounds()).0
+    }
+
+    fn newton_within(
+        &self,
+        p: P3,
+        start: (f64, f64),
+        bounds: [(f64, f64); 2],
+    ) -> Option<(f64, f64)> {
+        let ((u, v), stalled) = self.descend(p, start, bounds);
+        if stalled {
+            return None;
+        }
+        let [(u0, u1), (v0, v1)] = bounds;
+        let (pu, pv) = self.period();
+        // Settled: on the surface, or where the free directions are at right angles to the
+        // remaining distance (a point off a curved surface or beyond its boundary).
+        let (s, su, sv) = self.derivs(u, v);
+        let r = sub(p, s);
+        let nr = norm(r);
+        // Within a micrometre: an edge sample a hair off its face (callers check the distance).
+        if nr <= 1e-6 * (1.0 + norm(p)) {
+            return Some((u, v));
+        }
+        // Otherwise stationary when the Gauss–Newton step, with the parameters held at a bound
+        // dropped, would move the point by less than the arithmetic can resolve.
+        let held =
+            |x: f64, lo: f64, hi: f64, per: Option<f64>| per.is_none() && (x <= lo || x >= hi);
+        let (hu, hv) = (held(u, u0, u1, pu), held(v, v0, v1, pv));
+        let (a, b, c) = (dot(su, su), dot(su, sv), dot(sv, sv));
+        let (g1, g2) = (dot(su, r), dot(sv, r));
+        let det = a * c - b * b;
+        let step = match (hu, hv) {
+            (true, true) => [0.0; 3],
+            (true, false) if c > 0.0 => mul(sv, g2 / c),
+            (false, true) if a > 0.0 => mul(su, g1 / a),
+            (false, false) if det > 0.0 => add(
+                mul(su, (c * g1 - b * g2) / det),
+                mul(sv, (a * g2 - b * g1) / det),
+            ),
+            _ => return None,
+        };
+        // Squared distances place the foot of a point at distance `nr` only to about the square
+        // root of the arithmetic's precision times `nr`.
+        (norm(step) <= 1e-9 * (1.0 + norm(p)) + FOOT_PRECISION * nr).then_some((u, v))
+    }
+
     /// Gauss–Newton on the squared distance with step halving; non-periodic parameters stay in
     /// `bounds`, and a parameter held at its bound by the step leaves the other to move alone.
-    fn newton_within(
+    /// Where it ends, and whether it stalled where the surface has no tangents, short of `p`.
+    fn descend(
         &self,
         p: P3,
         (mut u, mut v): (f64, f64),
         [(u0, u1), (v0, v1)]: [(f64, f64); 2],
-    ) -> Option<(f64, f64)> {
+    ) -> ((f64, f64), bool) {
         let (pu, pv) = self.period();
         let keep = |x: f64, lo: f64, hi: f64, per: Option<f64>| {
             if per.is_some() { x } else { x.clamp(lo, hi) }
@@ -517,7 +568,7 @@ impl Surface {
             let (s, su, sv) = self.derivs(u, v);
             let r = sub(p, s);
             if norm(r) <= close {
-                return Some((u, v));
+                return ((u, v), false);
             }
             let (a, b, c) = (dot(su, su), dot(su, sv), dot(sv, sv));
             let (g1, g2) = (dot(su, r), dot(sv, r));
@@ -529,7 +580,7 @@ impl Surface {
             } else if c > 0.0 {
                 (0.0, g2 / c)
             } else {
-                return None;
+                return ((u, v), true);
             };
             if pinned(u, du, u0, u1, pu) {
                 (du, dv) = (0.0, if c > 0.0 { g2 / c } else { 0.0 });
@@ -567,35 +618,6 @@ impl Surface {
                 break;
             }
         }
-        // Settled: on the surface, or where the free directions are at right angles to the
-        // remaining distance (a point off a curved surface or beyond its boundary).
-        let (s, su, sv) = self.derivs(u, v);
-        let r = sub(p, s);
-        let nr = norm(r);
-        // Within a micrometre: an edge sample a hair off its face (callers check the distance).
-        if nr <= 1e-6 * (1.0 + norm(p)) {
-            return Some((u, v));
-        }
-        // Otherwise stationary when the Gauss–Newton step, with the parameters held at a bound
-        // dropped, would move the point by less than the arithmetic can resolve.
-        let held =
-            |x: f64, lo: f64, hi: f64, per: Option<f64>| per.is_none() && (x <= lo || x >= hi);
-        let (hu, hv) = (held(u, u0, u1, pu), held(v, v0, v1, pv));
-        let (a, b, c) = (dot(su, su), dot(su, sv), dot(sv, sv));
-        let (g1, g2) = (dot(su, r), dot(sv, r));
-        let det = a * c - b * b;
-        let step = match (hu, hv) {
-            (true, true) => [0.0; 3],
-            (true, false) if c > 0.0 => mul(sv, g2 / c),
-            (false, true) if a > 0.0 => mul(su, g1 / a),
-            (false, false) if det > 0.0 => add(
-                mul(su, (c * g1 - b * g2) / det),
-                mul(sv, (a * g2 - b * g1) / det),
-            ),
-            _ => return None,
-        };
-        // Squared distances place the foot of a point at distance `nr` only to about the square
-        // root of the arithmetic's precision times `nr`.
-        (norm(step) <= 1e-9 * (1.0 + norm(p)) + FOOT_PRECISION * nr).then_some((u, v))
+        ((u, v), false)
     }
 }
