@@ -1,0 +1,2 @@
+# Tests edit the fixtures by their LF line ends.
+*.step -text
