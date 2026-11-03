@@ -6,6 +6,7 @@ keywords = ["step", "cad", "mesh", "brep", "tessellation"]
 categories = ["parser-implementations", "graphics", "science"]
 readme = "../README.md"
 repository = "https://github.com/serdarvaran/stepmesh"
+homepage = "https://vrnsoft.com.tr/yazilim/stepmesh"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

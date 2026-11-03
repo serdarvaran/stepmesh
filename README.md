@@ -5,6 +5,8 @@ their B-rep solids into closed, consistently oriented triangle meshes in millime
 code: the only dependency is [`spade`](https://crates.io/crates/spade) for constrained Delaunay
 triangulation.
 
+Project page (Turkish): <https://vrnsoft.com.tr/yazilim/stepmesh>
+
 ```toml
 [dependencies]
 stepmesh = "0.1"
